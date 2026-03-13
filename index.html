@@ -3,648 +3,344 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Luau Deobfuscator & Analyzer</title>
+    <title>Luau VM Deobfuscator</title>
     <style>
         :root {
-            --bg-primary: #0d1117;
-            --bg-secondary: #161b22;
-            --bg-tertiary: #1c2333;
-            --border: #30363d;
-            --text-primary: #e6edf3;
-            --text-secondary: #8b949e;
-            --accent: #58a6ff;
-            --accent-hover: #79c0ff;
-            --green: #3fb950;
-            --red: #f85149;
-            --orange: #d29922;
-            --purple: #bc8cff;
-            --cyan: #39d2c0;
-            --pink: #f778ba;
+            --bg0: #0a0e14;
+            --bg1: #11151c;
+            --bg2: #1a1f2b;
+            --bg3: #232938;
+            --border: #2d3548;
+            --text: #e1e8f0;
+            --dim: #6b7a8d;
+            --accent: #4fc1ff;
+            --green: #41d98c;
+            --red: #ff5c57;
+            --orange: #ffb347;
+            --purple: #c792ea;
+            --yellow: #ffe066;
+            --cyan: #56d4c8;
+            --pink: #ff6b9d;
         }
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
+        * { margin:0; padding:0; box-sizing:border-box; }
         body {
-            font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', monospace;
-            background: var(--bg-primary);
-            color: var(--text-primary);
+            font-family: 'JetBrains Mono','Fira Code','SF Mono',monospace;
+            background: var(--bg0);
+            color: var(--text);
             min-height: 100vh;
         }
-
         .header {
-            background: var(--bg-secondary);
+            background: var(--bg1);
             border-bottom: 1px solid var(--border);
-            padding: 16px 24px;
+            padding: 12px 20px;
             display: flex;
             align-items: center;
             justify-content: space-between;
             flex-wrap: wrap;
-            gap: 12px;
+            gap: 10px;
         }
-
         .header h1 {
-            font-size: 1.3em;
-            font-weight: 700;
+            font-size: 1.1em;
             background: linear-gradient(135deg, var(--accent), var(--purple));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            display: flex;
-            align-items: center;
-            gap: 10px;
         }
-
-        .header h1 .icon {
-            font-size: 1.4em;
-            -webkit-text-fill-color: initial;
-        }
-
-        .header-actions {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
+        .header-actions { display: flex; gap: 6px; flex-wrap: wrap; }
         .btn {
-            padding: 8px 16px;
+            padding: 7px 14px;
             border: 1px solid var(--border);
-            border-radius: 6px;
-            background: var(--bg-tertiary);
-            color: var(--text-primary);
+            border-radius: 5px;
+            background: var(--bg2);
+            color: var(--text);
             font-family: inherit;
-            font-size: 0.85em;
+            font-size: 0.8em;
             cursor: pointer;
-            transition: all 0.2s;
-            display: flex;
-            align-items: center;
-            gap: 6px;
+            transition: 0.15s;
         }
-
-        .btn:hover {
-            border-color: var(--accent);
-            background: rgba(88, 166, 255, 0.1);
-        }
-
-        .btn-primary {
-            background: var(--accent);
-            color: #000;
-            border-color: var(--accent);
-            font-weight: 600;
-        }
-
-        .btn-primary:hover {
-            background: var(--accent-hover);
-        }
-
-        .btn-danger {
-            border-color: var(--red);
-            color: var(--red);
-        }
-
-        .btn-danger:hover {
-            background: rgba(248, 81, 73, 0.15);
-        }
-
-        .main-container {
+        .btn:hover { border-color: var(--accent); background: rgba(79,193,255,0.08); }
+        .btn-go { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 700; }
+        .btn-go:hover { background: #79d4ff; }
+        .main {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 0;
-            height: calc(100vh - 65px);
+            height: calc(100vh - 52px);
         }
-
-        @media (max-width: 900px) {
-            .main-container {
-                grid-template-columns: 1fr;
-                height: auto;
-            }
-        }
-
+        @media(max-width:850px) { .main { grid-template-columns:1fr; height:auto; } }
         .panel {
             display: flex;
             flex-direction: column;
             border-right: 1px solid var(--border);
             overflow: hidden;
         }
-
-        .panel:last-child {
-            border-right: none;
-        }
-
-        .panel-header {
-            background: var(--bg-secondary);
+        .panel:last-child { border-right: none; }
+        .panel-head {
+            background: var(--bg1);
             border-bottom: 1px solid var(--border);
-            padding: 10px 16px;
+            padding: 8px 14px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 8px;
             flex-shrink: 0;
         }
-
         .panel-title {
-            font-size: 0.85em;
+            font-size: 0.78em;
             font-weight: 600;
-            color: var(--text-secondary);
+            color: var(--dim);
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
         }
-
-        .panel-title .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            display: inline-block;
+        .dot {
+            width: 7px; height: 7px; border-radius: 50%;
+            display: inline-block; margin-right: 6px;
         }
-
-        .dot-green { background: var(--green); }
-        .dot-orange { background: var(--orange); }
-        .dot-red { background: var(--red); }
-        .dot-blue { background: var(--accent); }
-        .dot-purple { background: var(--purple); }
-
-        .panel-body {
-            flex: 1;
-            overflow: hidden;
-            position: relative;
+        .dot-g { background: var(--green); }
+        .dot-b { background: var(--accent); }
+        .dot-o { background: var(--orange); }
+        .badge {
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.68em;
+            font-weight: 600;
+            background: rgba(79,193,255,0.12);
+            color: var(--accent);
         }
-
+        .panel-body { flex: 1; overflow: hidden; position: relative; }
         textarea {
-            width: 100%;
-            height: 100%;
-            background: var(--bg-primary);
-            color: var(--text-primary);
+            width: 100%; height: 100%;
+            background: var(--bg0);
+            color: var(--text);
             border: none;
-            padding: 16px;
+            padding: 14px;
             font-family: inherit;
-            font-size: 0.82em;
+            font-size: 0.8em;
             line-height: 1.6;
             resize: none;
             outline: none;
             tab-size: 4;
         }
-
-        textarea::placeholder {
-            color: var(--text-secondary);
-            opacity: 0.6;
-        }
-
-        .output-container {
-            width: 100%;
-            height: 100%;
-            overflow-y: auto;
-            padding: 0;
-        }
-
+        textarea::placeholder { color: var(--dim); opacity: 0.5; }
         .tabs {
             display: flex;
-            background: var(--bg-secondary);
+            background: var(--bg1);
             border-bottom: 1px solid var(--border);
             overflow-x: auto;
             flex-shrink: 0;
         }
-
         .tab {
-            padding: 8px 16px;
-            font-size: 0.8em;
-            color: var(--text-secondary);
+            padding: 7px 14px;
+            font-size: 0.75em;
+            color: var(--dim);
             cursor: pointer;
+            border: none;
             border-bottom: 2px solid transparent;
-            transition: all 0.2s;
-            white-space: nowrap;
             background: none;
-            border-top: none;
-            border-left: none;
-            border-right: none;
             font-family: inherit;
-        }
-
-        .tab:hover {
-            color: var(--text-primary);
-        }
-
-        .tab.active {
-            color: var(--accent);
-            border-bottom-color: var(--accent);
-        }
-
-        .tab-content {
-            display: none;
-            height: 100%;
-            overflow-y: auto;
-        }
-
-        .tab-content.active {
-            display: block;
-        }
-
-        .log-entry {
-            padding: 4px 16px;
-            font-size: 0.78em;
-            border-bottom: 1px solid rgba(48, 54, 61, 0.4);
-            display: flex;
-            gap: 8px;
-            align-items: flex-start;
-            line-height: 1.5;
-        }
-
-        .log-entry:hover {
-            background: rgba(88, 166, 255, 0.04);
-        }
-
-        .log-tag {
-            padding: 1px 6px;
-            border-radius: 3px;
-            font-size: 0.75em;
-            font-weight: 600;
             white-space: nowrap;
-            flex-shrink: 0;
-            min-width: 70px;
-            text-align: center;
+            transition: 0.15s;
         }
-
-        .tag-info { background: rgba(88, 166, 255, 0.15); color: var(--accent); }
-        .tag-warn { background: rgba(210, 153, 34, 0.15); color: var(--orange); }
-        .tag-error { background: rgba(248, 81, 73, 0.15); color: var(--red); }
-        .tag-deobf { background: rgba(63, 185, 80, 0.15); color: var(--green); }
-        .tag-string { background: rgba(188, 140, 255, 0.15); color: var(--purple); }
-        .tag-flow { background: rgba(57, 210, 192, 0.15); color: var(--cyan); }
-        .tag-const { background: rgba(247, 120, 186, 0.15); color: var(--pink); }
-
-        .log-message {
-            word-break: break-all;
-            color: var(--text-primary);
-        }
-
-        .log-message .highlight {
-            color: var(--green);
-            font-weight: 600;
-        }
-
-        .log-message .str-val {
-            color: var(--orange);
-        }
-
-        .log-message .num-val {
-            color: var(--purple);
-        }
-
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 12px;
-            padding: 16px;
-        }
-
-        .stat-card {
-            background: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 16px;
-        }
-
-        .stat-card .stat-label {
-            font-size: 0.75em;
-            color: var(--text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 6px;
-        }
-
-        .stat-card .stat-value {
-            font-size: 1.6em;
-            font-weight: 700;
-        }
-
-        .stat-card .stat-sub {
-            font-size: 0.75em;
-            color: var(--text-secondary);
-            margin-top: 4px;
-        }
-
-        .string-table {
-            width: 100%;
-            border-collapse: collapse;
+        .tab:hover { color: var(--text); }
+        .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+        .tab-content { display: none; height: 100%; overflow-y: auto; }
+        .tab-content.active { display: block; }
+        .out-area {
+            padding: 14px;
             font-size: 0.8em;
-        }
-
-        .string-table th {
-            background: var(--bg-secondary);
-            border-bottom: 1px solid var(--border);
-            padding: 8px 12px;
-            text-align: left;
-            position: sticky;
-            top: 0;
-            color: var(--text-secondary);
-            font-size: 0.85em;
-            text-transform: uppercase;
-        }
-
-        .string-table td {
-            padding: 6px 12px;
-            border-bottom: 1px solid rgba(48, 54, 61, 0.3);
-            vertical-align: top;
-        }
-
-        .string-table tr:hover td {
-            background: rgba(88, 166, 255, 0.04);
-        }
-
-        .decoded-str {
-            color: var(--green);
-            font-weight: 600;
-        }
-
-        .method-badge {
-            display: inline-block;
-            padding: 1px 6px;
-            border-radius: 3px;
-            font-size: 0.8em;
-            background: rgba(188, 140, 255, 0.15);
-            color: var(--purple);
-        }
-
-        .tree-node {
-            padding: 4px 0 4px 20px;
-            font-size: 0.82em;
-        }
-
-        .tree-node .tree-key {
-            color: var(--accent);
-        }
-
-        .tree-node .tree-type {
-            color: var(--text-secondary);
-            font-size: 0.85em;
-        }
-
-        .progress-bar {
-            height: 3px;
-            background: var(--border);
-            position: relative;
-            overflow: hidden;
-        }
-
-        .progress-bar .progress-fill {
-            height: 100%;
-            background: linear-gradient(90deg, var(--accent), var(--purple));
-            transition: width 0.3s;
-        }
-
-        .loading-overlay {
-            position: absolute;
-            inset: 0;
-            background: rgba(13, 17, 23, 0.85);
-            display: none;
-            align-items: center;
-            justify-content: center;
-            z-index: 100;
-            flex-direction: column;
-            gap: 16px;
-        }
-
-        .loading-overlay.active {
-            display: flex;
-        }
-
-        .spinner {
-            width: 32px;
-            height: 32px;
-            border: 3px solid var(--border);
-            border-top: 3px solid var(--accent);
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-        }
-
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-
-        .empty-state {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            color: var(--text-secondary);
-            gap: 12px;
-            padding: 40px;
-            text-align: center;
-        }
-
-        .empty-state .icon {
-            font-size: 3em;
-            opacity: 0.3;
-        }
-
-        .code-block {
-            background: var(--bg-tertiary);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 12px;
-            margin: 8px 16px;
-            font-size: 0.8em;
-            overflow-x: auto;
+            line-height: 1.6;
             white-space: pre-wrap;
             word-break: break-all;
         }
-
-        ::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
+        .section {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            margin-bottom: 12px;
+            overflow: hidden;
         }
-
-        ::-webkit-scrollbar-track {
-            background: var(--bg-primary);
-        }
-
-        ::-webkit-scrollbar-thumb {
-            background: var(--border);
-            border-radius: 4px;
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-            background: var(--text-secondary);
-        }
-
-        .filter-bar {
-            padding: 8px 16px;
-            background: var(--bg-secondary);
+        .section-head {
+            padding: 8px 12px;
+            font-size: 0.75em;
+            font-weight: 600;
+            color: var(--dim);
+            text-transform: uppercase;
             border-bottom: 1px solid var(--border);
             display: flex;
-            gap: 8px;
             align-items: center;
+            gap: 6px;
+        }
+        .section-body { padding: 10px 12px; }
+        .str-row {
+            display: flex;
+            gap: 10px;
+            padding: 3px 0;
+            border-bottom: 1px solid rgba(45,53,72,0.4);
+            font-size: 0.82em;
+            align-items: flex-start;
+        }
+        .str-row:last-child { border-bottom: none; }
+        .str-idx { color: var(--dim); min-width: 30px; text-align: right; flex-shrink: 0; }
+        .str-raw { color: var(--orange); word-break: break-all; flex: 1; }
+        .str-dec { color: var(--green); word-break: break-all; flex: 1; font-weight: 600; }
+        .str-method {
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-size: 0.72em;
+            background: rgba(199,146,234,0.15);
+            color: var(--purple);
             flex-shrink: 0;
         }
-
-        .filter-input {
-            flex: 1;
+        .log-line {
+            padding: 2px 0;
+            font-size: 0.78em;
+            display: flex;
+            gap: 8px;
+        }
+        .log-tag {
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-size: 0.72em;
+            font-weight: 600;
+            min-width: 55px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+        .t-info { background: rgba(79,193,255,0.12); color: var(--accent); }
+        .t-ok { background: rgba(65,217,140,0.12); color: var(--green); }
+        .t-warn { background: rgba(255,179,71,0.12); color: var(--orange); }
+        .t-err { background: rgba(255,92,87,0.12); color: var(--red); }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(160px,1fr));
+            gap: 10px;
+        }
+        .stat-card {
+            background: var(--bg1);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 12px;
+        }
+        .stat-label { font-size: 0.68em; color: var(--dim); text-transform: uppercase; margin-bottom: 4px; }
+        .stat-val { font-size: 1.4em; font-weight: 700; }
+        .stat-sub { font-size: 0.68em; color: var(--dim); margin-top: 2px; }
+        .empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--dim);
+            gap: 8px;
+            padding: 30px;
+            text-align: center;
+        }
+        .empty .ico { font-size: 2.5em; opacity: 0.25; }
+        .code-block {
+            background: var(--bg1);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            padding: 12px;
+            font-size: 0.8em;
+            white-space: pre-wrap;
+            word-break: break-all;
+            overflow-x: auto;
+            line-height: 1.5;
+        }
+        .progress { height: 2px; background: var(--border); }
+        .progress-fill { height: 100%; background: linear-gradient(90deg,var(--accent),var(--purple)); width: 0; transition: width 0.3s; }
+        .copy-btn {
             padding: 5px 10px;
-            background: var(--bg-primary);
             border: 1px solid var(--border);
             border-radius: 4px;
-            color: var(--text-primary);
+            background: var(--bg2);
+            color: var(--text);
             font-family: inherit;
-            font-size: 0.82em;
+            font-size: 0.72em;
+            cursor: pointer;
+        }
+        .copy-btn:hover { border-color: var(--green); color: var(--green); }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg0); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+        .hl-str { color: var(--green); }
+        .hl-num { color: var(--purple); }
+        .hl-kw { color: var(--pink); }
+        .hl-cmt { color: var(--dim); font-style: italic; }
+        .hl-fn { color: var(--yellow); }
+        .filter-bar {
+            padding: 6px 12px;
+            background: var(--bg1);
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        .filter-input {
+            width: 100%;
+            padding: 4px 8px;
+            background: var(--bg0);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            color: var(--text);
+            font-family: inherit;
+            font-size: 0.78em;
             outline: none;
         }
-
-        .filter-input:focus {
-            border-color: var(--accent);
-        }
-
-        .badge {
-            padding: 2px 8px;
-            border-radius: 10px;
-            font-size: 0.7em;
-            font-weight: 600;
-            background: rgba(88, 166, 255, 0.15);
-            color: var(--accent);
-        }
+        .filter-input:focus { border-color: var(--accent); }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>
-            <span class="icon">🔓</span>
-            Luau Deobfuscator & Env Analyzer
-        </h1>
+        <h1>🔓 Luau VM Deobfuscator</h1>
         <div class="header-actions">
-            <button class="btn" onclick="loadSample()" title="Load sample obfuscated code">
-                📋 Sample
-            </button>
-            <button class="btn" onclick="clearAll()">
-                🗑️ Clear
-            </button>
-            <button class="btn btn-primary" onclick="analyze()">
-                ⚡ Analyze & Deobfuscate
-            </button>
-            <button class="btn" onclick="exportResults()">
-                💾 Export
-            </button>
+            <button class="btn" onclick="loadSample()">📋 Load Sample</button>
+            <button class="btn" onclick="clearAll()">🗑️ Clear</button>
+            <button class="btn btn-go" onclick="deobfuscate()">⚡ Deobfuscate</button>
+            <button class="btn" onclick="exportAll()">💾 Export</button>
         </div>
     </div>
-
-    <div class="progress-bar" id="progressBar">
-        <div class="progress-fill" id="progressFill" style="width: 0%"></div>
-    </div>
-
-    <div class="main-container">
-        <!-- Input Panel -->
+    <div class="progress"><div class="progress-fill" id="prog"></div></div>
+    <div class="main">
         <div class="panel">
-            <div class="panel-header">
-                <div class="panel-title">
-                    <span class="dot dot-green"></span>
-                    Input — Obfuscated Luau
-                </div>
-                <span class="badge" id="inputSize">0 bytes</span>
+            <div class="panel-head">
+                <span class="panel-title"><span class="dot dot-g"></span>Input</span>
+                <span class="badge" id="inSize">0 B</span>
             </div>
             <div class="panel-body">
-                <textarea id="inputCode" placeholder="Paste obfuscated Luau/Lua code here...
-
-Supports:
-• XOR / Caesar / Base64 encoded strings
-• Control flow flattening detection
-• Constant folding
-• String table extraction
-• Proxy function detection
-• Byte array decoding
-• Environment access logging
-• Dead code detection"></textarea>
+                <textarea id="codeIn" placeholder="Paste obfuscated Luau/Lua code here..."></textarea>
             </div>
         </div>
-
-        <!-- Output Panel -->
         <div class="panel">
-            <div class="panel-header">
-                <div class="panel-title">
-                    <span class="dot dot-blue"></span>
-                    Analysis Output
-                </div>
-                <span class="badge" id="logCount">0 entries</span>
+            <div class="panel-head">
+                <span class="panel-title"><span class="dot dot-b"></span>Output</span>
+                <span class="badge" id="outInfo">—</span>
             </div>
             <div class="tabs">
-                <button class="tab active" onclick="switchTab('overview')">📊 Overview</button>
-                <button class="tab" onclick="switchTab('strings')">🔤 Strings</button>
-                <button class="tab" onclick="switchTab('structure')">🌳 Structure</button>
-                <button class="tab" onclick="switchTab('flow')">🔀 Flow</button>
-                <button class="tab" onclick="switchTab('log')">📋 Log</button>
-                <button class="tab" onclick="switchTab('deobf')">✨ Deobfuscated</button>
+                <button class="tab active" data-tab="overview">📊 Overview</button>
+                <button class="tab" data-tab="strings">🔤 Strings</button>
+                <button class="tab" data-tab="structure">🌳 Structure</button>
+                <button class="tab" data-tab="log">📋 Log</button>
+                <button class="tab" data-tab="decoded">✨ Decoded</button>
             </div>
             <div class="panel-body">
-                <div class="loading-overlay" id="loadingOverlay">
-                    <div class="spinner"></div>
-                    <div style="color: var(--text-secondary); font-size: 0.85em;">Analyzing...</div>
-                </div>
-
-                <!-- Overview Tab -->
                 <div class="tab-content active" id="tab-overview">
-                    <div class="empty-state" id="overviewEmpty">
-                        <div class="icon">📊</div>
-                        <div>Paste code and click <strong>Analyze</strong> to begin</div>
-                    </div>
-                    <div id="overviewContent" style="display:none;"></div>
+                    <div class="empty" id="emptyState"><div class="ico">🔓</div><div>Paste code & click <b>Deobfuscate</b></div></div>
+                    <div id="overviewOut" style="display:none"></div>
                 </div>
-
-                <!-- Strings Tab -->
                 <div class="tab-content" id="tab-strings">
-                    <div class="filter-bar">
-                        <input type="text" class="filter-input" id="stringFilter" placeholder="Filter strings..." oninput="filterStrings()">
-                    </div>
-                    <div class="output-container" id="stringsContent">
-                        <div class="empty-state">
-                            <div class="icon">🔤</div>
-                            <div>No strings extracted yet</div>
-                        </div>
-                    </div>
+                    <div class="filter-bar"><input class="filter-input" id="strFilter" placeholder="Filter strings..." oninput="filterStrRows()"></div>
+                    <div class="out-area" id="stringsOut"></div>
                 </div>
-
-                <!-- Structure Tab -->
                 <div class="tab-content" id="tab-structure">
-                    <div class="output-container" id="structureContent">
-                        <div class="empty-state">
-                            <div class="icon">🌳</div>
-                            <div>No structure analysis yet</div>
-                        </div>
-                    </div>
+                    <div class="out-area" id="structOut"></div>
                 </div>
-
-                <!-- Flow Tab -->
-                <div class="tab-content" id="tab-flow">
-                    <div class="output-container" id="flowContent">
-                        <div class="empty-state">
-                            <div class="icon">🔀</div>
-                            <div>No control flow analysis yet</div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Log Tab -->
                 <div class="tab-content" id="tab-log">
-                    <div class="filter-bar">
-                        <input type="text" class="filter-input" id="logFilter" placeholder="Filter logs..." oninput="filterLogs()">
-                    </div>
-                    <div class="output-container" id="logContent"></div>
+                    <div class="filter-bar"><input class="filter-input" id="logFilter" placeholder="Filter log..." oninput="filterLogRows()"></div>
+                    <div class="out-area" id="logOut"></div>
                 </div>
-
-                <!-- Deobfuscated Tab -->
-                <div class="tab-content" id="tab-deobf">
-                    <div class="output-container" id="deobfContent">
-                        <div class="empty-state">
-                            <div class="icon">✨</div>
-                            <div>No deobfuscated output yet</div>
-                        </div>
-                    </div>
+                <div class="tab-content" id="tab-decoded">
+                    <div class="out-area" id="decodedOut"></div>
                 </div>
             </div>
         </div>
     </div>
-
     <script src="index.js"></script>
 </body>
 </html>
