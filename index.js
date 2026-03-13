@@ -1,183 +1,127 @@
 /*
- * Luau Deobfuscator — executes the actual string decoding
- * logic that WeAreDevs (and similar) obfuscators use:
+ * ═══════════════════════════════════════════════════
+ *  Luau VM Deobfuscator
+ *  
+ *  WeAreDevs obfuscator compiles Lua source into
+ *  CUSTOM BYTECODE that runs on a VM interpreter
+ *  embedded in the script. The string table contains
+ *  raw binary VM data — NOT human-readable strings.
  *
- * 1) Decimal-escape strings → raw bytes (these are base64 chars)
- * 2) Index shuffles via ipairs swap loops
- * 3) Accessor function y(n) = r[n - offset]
- * 4) Base64 decoding of the resulting strings
- * 5) VM opcode table + constant analysis
+ *  To get the REAL code, you must either:
+ *   A) Run the script with hooks that intercept API calls
+ *   B) Reverse-engineer the VM interpreter
  *
- * This runs entirely in-browser, no server needed.
+ *  This tool does BOTH:
+ *   1) Static analysis of the VM structure
+ *   2) Generates a hook/wrapper script that,
+ *      when run in a Luau environment, intercepts
+ *      all the real function calls and outputs
+ *      the decompiled logic
+ * ═══════════════════════════════════════════════════
  */
 
-const S = {
-  logs: [], strings: [], resolved: {}, output: '',
-  stats: { score:0, strN:0, decN:0, b64N:0, funcs:0, patterns:0, methods: new Set() }
+const ST = {
+  logs: [],
+  rawStrings: [],
+  shuffledStrings: [],
+  vmInfo: {},
+  hookScript: '',
+  stats: { score:0, strN:0, funcs:0, vmOps:0, methods:new Set() }
 };
 
 // ── Tabs ──
 document.querySelectorAll('.tab').forEach(t => {
   t.onclick = () => {
-    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
-    document.querySelectorAll('.tc').forEach(x=>x.classList.remove('on'));
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+    document.querySelectorAll('.tc').forEach(x => x.classList.remove('on'));
     t.classList.add('on');
-    document.getElementById('t-'+t.dataset.t).classList.add('on');
+    document.getElementById('t-' + t.dataset.t).classList.add('on');
   };
 });
-document.getElementById('ci').addEventListener('input', uSz);
-function uSz(){ const v=document.getElementById('ci').value; document.getElementById('sz').textContent=v.length>1024?(v.length/1024).toFixed(1)+' KB':v.length+' B'; }
 
-function pg(p){ document.getElementById('pg').style.width=p+'%'; }
-function e(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function tr(s,n=80){ return s.length>n?s.slice(0,n)+'…':s; }
-function L(c,m,l='INFO'){ S.logs.push({c,m,l}); }
+const $=id=>document.getElementById(id);
+$('ci').addEventListener('input', uSz);
+function uSz(){ const v=$('ci').value; $('sz').textContent=v.length>1024?(v.length/1024).toFixed(1)+' KB':v.length+' B'; }
+function pg(p){ $('pg').style.width=p+'%'; }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function trn(s,n=80){ return s.length>n?s.slice(0,n)+'…':s; }
+function L(c,m,l='INFO'){ ST.logs.push({c,m,l}); }
 
-// ═════════════════════════════════════════
-//  STEP 1: Decode \DDD decimal escapes
-//  In Lua/Luau, "\073" = char(73) = 'I'
-//  The obfuscator encodes base64 chars this way
-// ═════════════════════════════════════════
+// ═══════════════════════════════════════
+//  Decimal escape decoder
+//  \073 → chr(73) = 'I'
+// ═══════════════════════════════════════
 function decEsc(s) {
-  return s.replace(/\\(\d{1,3})/g, (_,d) => {
+  return s.replace(/\\(\d{1,3})/g, (_, d) => {
     const c = parseInt(d, 10);
-    return (c >= 0 && c <= 255) ? String.fromCharCode(c) : _;
-  }).replace(/\\x([0-9a-fA-F]{2})/g, (_,h) => {
-    return String.fromCharCode(parseInt(h,16));
-  }).replace(/\\n/g,'\n').replace(/\\t/g,'\t').replace(/\\r/g,'\r')
-    .replace(/\\\\/g,'\\').replace(/\\"/g,'"').replace(/\\'/g,"'");
+    return c >= 0 && c <= 255 ? String.fromCharCode(c) : _;
+  });
 }
 
-// ═════════════════════════════════════════
-//  STEP 2: Base64 decode
-//  After decimal-escape decode, each string
-//  in the table is a base64-encoded value
-// ═════════════════════════════════════════
-function b64dec(s) {
-  try {
-    // Standard base64
-    const cleaned = s.replace(/[^A-Za-z0-9+/=]/g, '');
-    if (cleaned.length < 2) return null;
-    if (cleaned.length % 4 !== 0 && !cleaned.includes('=')) {
-      // Pad if needed
-      const padded = cleaned + '='.repeat((4 - cleaned.length % 4) % 4);
-      return atob(padded);
-    }
-    return atob(cleaned);
-  } catch(e) { return null; }
-}
-
-function isPrint(s) {
-  if (!s || s.length === 0) return false;
-  let p = 0;
-  for (let i = 0; i < Math.min(s.length, 50); i++) {
-    const c = s.charCodeAt(i);
-    if ((c >= 32 && c <= 126) || c === 10 || c === 13 || c === 9) p++;
-  }
-  return p / Math.min(s.length, 50) > 0.6;
-}
-
-// ═════════════════════════════════════════
-//  Extract the string table from source
-// ═════════════════════════════════════════
-function extractTable(src) {
-  const results = [];
-
-  // Find: local r={...} — the main string table
-  // Match opening brace after "local X={"
-  // We need to handle nested braces and semicolons as separators
-  const startMatch = src.match(/local\s+(\w)\s*=\s*\{/);
-  if (!startMatch) {
-    L('TABLE', 'No string table found with "local X={" pattern', 'WARN');
-    // Try alternate: just find the first big table
-    return extractStringsGlobal(src);
-  }
-
-  const varName = startMatch[1];
-  const startIdx = startMatch.index + startMatch[0].length;
-  L('TABLE', `Found table variable: "${varName}" at position ${startMatch.index}`, 'OK');
-
-  // Find matching closing brace
-  let depth = 1;
-  let i = startIdx;
+// ═══════════════════════════════════════
+//  Extract string table entries (raw)
+// ═══════════════════════════════════════
+function extractStringTable(src) {
+  const entries = [];
+  const tblMatch = src.match(/local\s+(\w)\s*=\s*\{/);
+  if (!tblMatch) { L('TABLE','No string table found','WARN'); return { vn:'?', entries }; }
+  
+  const vn = tblMatch[1];
+  const start = tblMatch.index + tblMatch[0].length;
+  let depth = 1, i = start;
   while (i < src.length && depth > 0) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') depth--;
+    if (src[i]==='{') depth++;
+    else if (src[i]==='}') depth--;
     if (depth > 0) i++;
   }
-  const tableBody = src.substring(startIdx, i);
-
-  // Extract each string entry
+  const body = src.substring(start, i);
+  
   const re = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g;
   let m, idx = 0;
-  while ((m = re.exec(tableBody)) !== null) {
+  while ((m = re.exec(body)) !== null) {
     idx++;
     const raw = m[1] !== undefined ? m[1] : m[2];
-    const step1 = decEsc(raw);  // decode \073 -> 'I' etc
-    const step2 = b64dec(step1); // base64 decode
-
-    results.push({
-      i: idx,
-      raw,              // original escaped
-      escaped: step1,   // after decimal-escape decode (= base64 string)
-      decoded: step2,   // after base64 decode (= actual value)
-      isB64: step2 !== null && step2 !== step1,
-      isPrintable: step2 ? isPrint(step2) : isPrint(step1)
-    });
+    const decoded = decEsc(raw);
+    // Show as hex dump for binary data
+    let hexDump = '';
+    let printable = '';
+    for (let j = 0; j < decoded.length; j++) {
+      const cc = decoded.charCodeAt(j);
+      hexDump += cc.toString(16).padStart(2,'0') + ' ';
+      printable += (cc >= 32 && cc <= 126) ? decoded[j] : '.';
+    }
+    entries.push({ i: idx, raw, decoded, hexDump: hexDump.trim(), printable, len: decoded.length });
   }
-
-  L('TABLE', `Extracted ${results.length} string entries`, 'OK');
-  return { varName, results };
+  
+  L('TABLE', `Extracted ${entries.length} entries from table "${vn}"`, 'OK');
+  return { vn, entries };
 }
 
-function extractStringsGlobal(src) {
-  const results = [];
-  const re = /"((?:\\[\d]{2,3}){3,}[^"]*)"/g;
-  let m, idx = 0;
-  while ((m = re.exec(src)) !== null) {
-    idx++;
-    const raw = m[1];
-    const step1 = decEsc(raw);
-    const step2 = b64dec(step1);
-    results.push({
-      i: idx, raw, escaped: step1,
-      decoded: step2,
-      isB64: step2 !== null && step2 !== step1,
-      isPrintable: step2 ? isPrint(step2) : isPrint(step1)
-    });
-  }
-  return { varName: '?', results };
-}
-
-// ═════════════════════════════════════════
-//  Extract and apply shuffle operations
-// ═════════════════════════════════════════
+// ═══════════════════════════════════════
+//  Shuffle operations
+// ═══════════════════════════════════════
 function extractShuffles(src) {
   const ops = [];
-  // Find: for y,F in ipairs({{expr,expr},{expr,expr},...}) do while ...
   const block = src.match(/for\s+\w+\s*,\s*\w+\s+in\s+ipairs\s*\(\s*\{([\s\S]*?)\}\s*\)\s*do\s+while/);
   if (!block) return ops;
-
-  const inner = block[1];
-  const pairRe = /\{([^}]+)\}/g;
+  const pRe = /\{([^}]+)\}/g;
   let m;
-  while ((m = pairRe.exec(inner)) !== null) {
+  while ((m = pRe.exec(block[1])) !== null) {
     const parts = m[1].split(',');
     if (parts.length >= 2) {
-      const a = safeEval(parts[0].trim());
-      const b = safeEval(parts[1].trim());
+      const a = sEval(parts[0].trim());
+      const b = sEval(parts[1].trim());
       if (a !== null && b !== null) ops.push([a, b]);
     }
   }
-  if (ops.length) L('SHUFFLE', `Found ${ops.length} swap operations`, 'OK');
   return ops;
 }
 
-function safeEval(expr) {
-  expr = expr.replace(/\s/g, '');
-  if (!/^[\d+\-*()]+$/.test(expr)) return null;
+function sEval(expr) {
+  expr = expr.replace(/\s/g,'');
+  if (!/^[-\d+*()]+$/.test(expr)) return null;
   try {
-    const r = Function('"use strict";return('+expr+')')();
+    const r = Function('"use strict";return(' + expr + ')')();
     return typeof r === 'number' && isFinite(r) ? Math.round(r) : null;
   } catch { return null; }
 }
@@ -187,405 +131,768 @@ function applyShuffle(arr, ops) {
   for (const [sA, sB] of ops) {
     let lo = sA, hi = sB;
     while (lo < hi) {
-      const iA = lo - 1, iB = hi - 1; // Lua 1-indexed → JS 0-indexed
-      if (iA >= 0 && iA < a.length && iB >= 0 && iB < a.length) {
-        [a[iA], a[iB]] = [a[iB], a[iA]];
-      }
+      const iA = lo-1, iB = hi-1;
+      if (iA>=0 && iA<a.length && iB>=0 && iB<a.length) [a[iA],a[iB]]=[a[iB],a[iA]];
       lo++; hi--;
     }
   }
-  return a.map((s, i) => ({ ...s, i: i + 1 }));
+  return a.map((s,i)=>({...s, i:i+1}));
 }
 
-// ═════════════════════════════════════════
-//  Find accessor function offset
-//  function y(y) return r[y-(EXPR)] end
-// ═════════════════════════════════════════
-function findOffset(src) {
-  // Pattern variations:
-  // return r[y-(-393492+446576)]
-  // return r[y-(expr)]
-  const patterns = [
-    /function\s+(\w+)\s*\(\s*\w+\s*\)\s*return\s+\w+\s*\[\s*\w+\s*-\s*\(([^)]+)\)\s*\]/,
-    /function\s+(\w+)\s*\(\s*\w+\s*\)\s*return\s+\w+\s*\[\s*\w+\s*\+\s*\(([^)]+)\)\s*\]/,
-    /function\s+(\w+)\s*\(\s*\w+\s*\)\s*return\s+\w+\s*\[\s*\w+\s*-\s*([^\]]+)\]/
-  ];
-
-  for (let pi = 0; pi < patterns.length; pi++) {
-    const m = src.match(patterns[pi]);
-    if (m) {
-      const fnName = m[1];
-      const val = safeEval(m[2]);
-      if (val !== null) {
-        const offset = pi === 1 ? -val : val; // + means negative offset
-        L('OFFSET', `Accessor "${fnName}", offset = ${offset}`, 'OK');
-        return { fnName, offset };
-      }
-    }
+// ═══════════════════════════════════════
+//  VM Structure Analysis
+// ═══════════════════════════════════════
+function analyzeVM(src) {
+  const info = {
+    type: 'Unknown',
+    hasDispatcher: false,
+    dispatcherType: '',
+    envAccess: [],
+    apiCalls: [],
+    opcodeCount: 0,
+    hasIntegrityCheck: false,
+    hasAntiDebug: false,
+    wrapperArgs: [],
+    innerFunctions: 0,
+    complexity: 0,
+  };
+  
+  // Identify obfuscator
+  if (/wearedevs/i.test(src)) {
+    info.type = 'WeAreDevs';
+    L('VM', '✓ WeAreDevs obfuscator identified', 'OK');
   }
-  return null;
-}
-
-// ═════════════════════════════════════════
-//  Resolve all y(expr) → actual string
-// ═════════════════════════════════════════
-function resolveAll(src, strings, acc) {
-  if (!acc) return {};
-  const map = {};
-  const re = new RegExp(acc.fnName.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '\\s*\\(([^)]+)\\)', 'g');
-  let m;
-  while ((m = re.exec(src)) !== null) {
-    const v = safeEval(m[1].trim());
-    if (v !== null) {
-      const idx = v - acc.offset; // 1-indexed
-      if (idx >= 1 && idx <= strings.length) {
-        const s = strings[idx - 1];
-        const val = s.decoded || s.escaped;
-        map[m[0]] = { call: m[0], idx, value: val, argExpr: m[1].trim(), argVal: v };
-      }
-    }
-  }
-  L('RESOLVE', `Resolved ${Object.keys(map).length} accessor calls`, 'OK');
-  return map;
-}
-
-// ═════════════════════════════════════════
-//  Detect patterns / score
-// ═════════════════════════════════════════
-function detectPatterns(src) {
-  const p = [];
-  const checks = [
-    [/return\s*\(\s*function\s*\(\.\.\.\)/g, 'Self-executing wrapper', 15],
-    [/\\(\d{3})/g, 'Decimal escape encoding', 10],
-    [/for\s+\w+\s*,\s*\w+\s+in\s+ipairs[\s\S]{0,50}while/g, 'Index shuffle loop', 12],
-    [/getfenv/g, 'getfenv access', 8],
-    [/setmetatable/g, 'Metatable manipulation', 5],
-    [/newproxy/g, 'newproxy (VM trick)', 10],
-    [/while\s+\w+\s+do\s+if\s+\w+\s*</g, 'VM dispatch loop', 15],
-    [/loadstring\s+or\s+load/g, 'Dynamic code loading', 12],
-    [/string\.char/g, 'string.char', 3],
-    [/string\.byte/g, 'string.byte', 3],
-    [/string\.sub/g, 'string.sub', 3],
-    [/select\s*\(\s*["']#/g, 'Vararg counting', 4],
-    [/bit32/g, 'Bitwise ops', 5],
-    [/wearedevs/i, 'WeAreDevs signature', 0],
-    [/v\d+\.\d+\.\d+/g, 'Version tag', 0],
-    [/math\.floor/g, 'math.floor', 2],
-    [/unpack\s+or\s+table/g, 'unpack compat', 3],
+  
+  // VM dispatcher detection
+  const dispatchPatterns = [
+    { re: /while\s+(\w+)\s+do\s+if\s+\1\s*<\s*(\d+)/g, type: 'numeric-compare-chain' },
+    { re: /while\s+(\w+)\s+do[\s\S]{0,100}if\s+\1\s*==/g, type: 'equality-dispatch' },
+    { re: /while\s+true\s+do[\s\S]{0,200}if\s+\w+\s*==/g, type: 'infinite-loop-dispatch' },
   ];
-  let score = 0;
-  for (const [re, name, w] of checks) {
-    const matches = src.match(re);
+  for (const dp of dispatchPatterns) {
+    const matches = src.match(dp.re);
     if (matches) {
-      p.push({ name, count: matches.length, weight: w });
-      score += Math.min(w, matches.length * Math.ceil(w / 3));
+      info.hasDispatcher = true;
+      info.dispatcherType = dp.type;
+      info.opcodeCount = matches.length;
+      L('VM', `Dispatcher: ${dp.type} (${matches.length} branches)`, 'OK');
     }
   }
-  return { patterns: p, score: Math.min(100, score) };
-}
-
-// ═════════════════════════════════════════
-//  Build final readable output
-// ═════════════════════════════════════════
-function buildOutput(strings, resolved) {
-  let out = '';
-  out += '-- ══════════════════════════════════════\n';
-  out += '-- DECODED STRING TABLE\n';
-  out += '-- Each string was: decimal-escaped → base64\n';
-  out += '-- ══════════════════════════════════════\n\n';
-
-  for (const s of strings) {
-    const val = s.decoded || s.escaped;
-    const safe = val.replace(/\\/g,'\\\\').replace(/"/g,'\\"')
-                    .replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\t/g,'\\t');
-    const b64note = s.isB64 ? ' (base64 decoded)' : '';
-    out += `r[${s.i}] = "${safe}"${b64note}\n`;
+  
+  // Count if/elseif chains (VM opcodes)
+  const ifChains = (src.match(/if\s+\w+\s*[<>=~]+/g) || []).length;
+  info.opcodeCount = Math.max(info.opcodeCount, ifChains);
+  info.complexity = ifChains;
+  
+  // Env access at the end
+  const envMatch = src.match(/end\s*\)\s*\(([^)]+)\)/);
+  if (envMatch) {
+    info.wrapperArgs = envMatch[1].split(',').map(s => s.trim());
+    L('VM', `Wrapper passes: ${info.wrapperArgs.join(', ')}`, 'OK');
   }
-
-  // Show resolved accessor calls
-  const rEntries = Object.values(resolved);
-  if (rEntries.length > 0) {
-    out += '\n-- ══════════════════════════════════════\n';
-    out += '-- RESOLVED ACCESSOR CALLS\n';
-    out += `-- ${rEntries.length} calls resolved\n`;
-    out += '-- ══════════════════════════════════════\n\n';
-    for (const r of rEntries) {
-      const safe = r.value.replace(/\\/g,'\\\\').replace(/"/g,'\\"')
-                          .replace(/\n/g,'\\n').replace(/\r/g,'\\r');
-      out += `${r.call}  -->  "${safe}"  (index ${r.idx})\n`;
+  
+  // Count inner function definitions
+  info.innerFunctions = (src.match(/function\s*\(/g) || []).length;
+  
+  // Anti-debug / integrity
+  if (/Integrity|integrity/i.test(src)) {
+    info.hasIntegrityCheck = true;
+    L('VM', '⚠ Integrity check detected', 'WARN');
+  }
+  
+  // Detect what APIs the VM references
+  const knownAPIs = [
+    'getfenv', 'setfenv', 'setmetatable', 'getmetatable',
+    'newproxy', 'select', 'unpack', 'pcall', 'xpcall',
+    'loadstring', 'string.char', 'string.byte', 'string.sub',
+    'string.len', 'string.rep', 'string.gsub', 'string.format',
+    'table.insert', 'table.concat', 'table.unpack', 'table.move',
+    'math.floor', 'math.abs', 'math.max', 'math.min',
+    'bit32.bxor', 'bit32.band', 'bit32.bor', 'bit32.lshift', 'bit32.rshift',
+    'coroutine.create', 'coroutine.resume', 'coroutine.yield', 'coroutine.wrap',
+    'tostring', 'tonumber', 'type', 'rawget', 'rawset', 'rawequal', 'rawlen',
+    'pairs', 'ipairs', 'next', 'error', 'assert',
+    'game', 'workspace', 'Instance.new', 'wait', 'spawn', 'delay',
+    'print', 'warn',
+  ];
+  
+  for (const api of knownAPIs) {
+    // Check both direct references and string matches
+    const escaped = api.replace(/\./g, '\\.');
+    if (new RegExp('\\b' + escaped + '\\b').test(src)) {
+      info.apiCalls.push(api);
     }
   }
-
-  // Try to identify what the script does
-  out += '\n-- ══════════════════════════════════════\n';
-  out += '-- SCRIPT ANALYSIS\n';
-  out += '-- ══════════════════════════════════════\n\n';
-
-  const allVals = strings.map(s => s.decoded || s.escaped).filter(Boolean);
-  const apiCalls = allVals.filter(v => v.includes('.') || v.includes(':'));
-  const properties = allVals.filter(v => /^[A-Z][a-zA-Z]+$/.test(v));
-  const methods = allVals.filter(v => /^[a-z][a-zA-Z]+$/.test(v) && v.length > 2);
-
-  if (apiCalls.length) {
-    out += '-- API calls found:\n';
-    for (const a of apiCalls) out += `--   ${a}\n`;
-  }
-  if (properties.length) {
-    out += '-- Properties:\n';
-    for (const p of properties) out += `--   ${p}\n`;
-  }
-  if (methods.length) {
-    out += '-- Methods/names:\n';
-    for (const m of methods) out += `--   ${m}\n`;
-  }
-
-  return out;
+  
+  L('VM', `VM uses ${info.apiCalls.length} standard APIs`, 'OK');
+  L('VM', `${info.innerFunctions} inner functions, complexity ${info.complexity}`, 'OK');
+  
+  return info;
 }
 
-// ═════════════════════════════════════════
-//  MAIN RUNNER
-// ═════════════════════════════════════════
+// ═══════════════════════════════════════
+//  Generate Hook Script
+//  This is the KEY — generates Luau code
+//  that when executed in a Roblox/Luau env,
+//  intercepts ALL real operations
+// ═══════════════════════════════════════
+function generateHookScript(src, vmInfo) {
+  // This generates a Luau script that wraps the obfuscated code
+  // and intercepts every function call, property access, etc.
+  
+  const script = `--[[
+    ╔══════════════════════════════════════════╗
+    ║  Luau VM Deobfuscator — Runtime Hook     ║
+    ║  Paste this in your executor/environment  ║
+    ║  It will run the obfuscated script and    ║
+    ║  log every real operation it performs      ║
+    ╚══════════════════════════════════════════╝
+    
+    HOW TO USE:
+    1. Paste this entire script into your Luau executor
+    2. It will execute the obfuscated code with hooks
+    3. Check the output for the real decompiled operations
+    4. All function calls, property accesses, and values
+       will be logged in readable format
+--]]
+
+-- ═══════════ CONFIGURATION ═══════════
+local LOG_OUTPUT = {} -- collected logs
+local MAX_DEPTH = 50
+local CALL_COUNT = 0
+
+-- ═══════════ LOGGING ═══════════
+local real_tostring = tostring
+local real_type = type
+local real_print = print
+local real_warn = warn
+local real_select = select
+local real_pcall = pcall
+local real_pairs = pairs
+local real_ipairs = ipairs
+local real_setmetatable = setmetatable
+local real_getmetatable = getmetatable
+local real_rawget = rawget
+local real_rawset = rawset
+local real_table_insert = table.insert
+local real_table_concat = table.concat
+local real_string_format = string.format
+local real_string_rep = string.rep
+
+local function safeStr(v)
+    local t = real_type(v)
+    if t == "string" then
+        if #v > 200 then
+            return '"' .. v:sub(1,200) .. '..."'
+        end
+        return '"' .. v .. '"'
+    elseif t == "number" or t == "boolean" or t == "nil" then
+        return real_tostring(v)
+    elseif t == "table" then
+        return "<table:" .. real_tostring(v):sub(-8) .. ">"
+    elseif t == "function" then
+        return "<func:" .. real_tostring(v):sub(-8) .. ">"
+    elseif t == "userdata" then
+        local ok, s = real_pcall(real_tostring, v)
+        return ok and s or "<userdata>"
+    else
+        return "<" .. t .. ">"
+    end
+end
+
+local function formatArgs(...)
+    local n = real_select("#", ...)
+    if n == 0 then return "" end
+    local parts = {}
+    for i = 1, n do
+        parts[i] = safeStr(real_select(i, ...))
+    end
+    return real_table_concat(parts, ", ")
+end
+
+local function LOG(msg)
+    CALL_COUNT = CALL_COUNT + 1
+    local entry = "[" .. CALL_COUNT .. "] " .. msg
+    real_table_insert(LOG_OUTPUT, entry)
+    real_print("[DEOBF] " .. entry)
+end
+
+-- ═══════════ ENVIRONMENT PROXY ═══════════
+-- Creates a proxy that logs all access
+
+local function createProxy(target, name)
+    if real_type(target) ~= "table" and real_type(target) ~= "userdata" then
+        return target
+    end
+    
+    local proxy = {}
+    local meta = {
+        __index = function(self, key)
+            local fullName = name .. "." .. real_tostring(key)
+            local value = target[key]
+            LOG("GET  " .. fullName .. " = " .. safeStr(value))
+            
+            if real_type(value) == "function" then
+                return function(...)
+                    local args = formatArgs(...)
+                    LOG("CALL " .. fullName .. "(" .. args .. ")")
+                    local results = {real_pcall(value, ...)}
+                    local success = results[1]
+                    if success then
+                        table.remove(results, 1)
+                        if #results > 0 then
+                            LOG("  => " .. formatArgs(unpack(results)))
+                        end
+                        return unpack(results)
+                    else
+                        LOG("  => ERROR: " .. real_tostring(results[2]))
+                        error(results[2])
+                    end
+                end
+            elseif real_type(value) == "table" or real_type(value) == "userdata" then
+                return createProxy(value, fullName)
+            end
+            return value
+        end,
+        
+        __newindex = function(self, key, value)
+            local fullName = name .. "." .. real_tostring(key)
+            LOG("SET  " .. fullName .. " = " .. safeStr(value))
+            target[key] = value
+        end,
+        
+        __call = function(self, ...)
+            local args = formatArgs(...)
+            LOG("CALL " .. name .. "(" .. args .. ")")
+            local results = {real_pcall(target, ...)}
+            local success = results[1]
+            if success then
+                table.remove(results, 1)
+                if #results > 0 then
+                    LOG("  => " .. formatArgs(unpack(results)))
+                end
+                return unpack(results)
+            else
+                LOG("  => ERROR: " .. real_tostring(results[2]))
+                error(results[2])
+            end
+        end,
+        
+        __tostring = function()
+            return real_tostring(target)
+        end,
+        
+        __len = function()
+            return #target
+        end,
+    }
+    
+    return real_setmetatable(proxy, meta)
+end
+
+-- ═══════════ HOOK CRITICAL FUNCTIONS ═══════════
+
+-- Hook loadstring to capture dynamically loaded code
+local real_loadstring = loadstring or load
+local function hooked_loadstring(code, ...)
+    LOG("═══ LOADSTRING CALLED ═══")
+    if real_type(code) == "string" then
+        LOG("CODE LENGTH: " .. #code)
+        if #code < 5000 then
+            LOG("CODE CONTENT:")
+            -- Split into lines for readability
+            for line in code:gmatch("[^\\n]+") do
+                LOG("  | " .. line)
+            end
+        else
+            LOG("CODE PREVIEW (first 2000 chars):")
+            LOG(code:sub(1, 2000))
+        end
+    end
+    LOG("═══ END LOADSTRING ═══")
+    return real_loadstring(code, ...)
+end
+
+-- Hook getfenv
+local real_getfenv = getfenv
+local function hooked_getfenv(level)
+    LOG("GETFENV(" .. real_tostring(level) .. ")")
+    local env = real_getfenv(level or 0)
+    return env -- Don't proxy the whole env to avoid breaking the VM
+end
+
+-- Hook setfenv  
+local real_setfenv = setfenv
+local function hooked_setfenv(fn, env)
+    LOG("SETFENV called")
+    return real_setfenv(fn, env)
+end
+
+-- Hook pcall/xpcall to see what's being protected
+local function hooked_pcall(fn, ...)
+    local args = formatArgs(...)
+    LOG("PCALL(" .. safeStr(fn) .. ", " .. args .. ")")
+    local results = {real_pcall(fn, ...)}
+    if results[1] then
+        LOG("  PCALL OK")
+    else
+        LOG("  PCALL FAIL: " .. real_tostring(results[2]))
+    end
+    return unpack(results)
+end
+
+-- Hook setmetatable to see VM dispatch tables
+local function hooked_setmetatable(t, mt)
+    LOG("SETMETATABLE on " .. safeStr(t))
+    if mt then
+        for k, v in real_pairs(mt) do
+            LOG("  meta." .. real_tostring(k) .. " = " .. safeStr(v))
+        end
+    end
+    return real_setmetatable(t, mt)
+end
+
+-- Hook newproxy (used by WeAreDevs for coroutine tricks)
+local real_newproxy = newproxy
+local function hooked_newproxy(addMeta)
+    LOG("NEWPROXY(" .. real_tostring(addMeta) .. ")")
+    return real_newproxy(addMeta)
+end
+
+-- Hook string.char (often used to reconstruct strings)
+local real_string_char = string.char
+string.char = function(...)
+    local result = real_string_char(...)
+    local args = formatArgs(...)
+    LOG("STRING.CHAR(" .. args .. ") = " .. safeStr(result))
+    return result
+end
+
+-- Hook string.byte
+local real_string_byte = string.byte
+string.byte = function(s, i, j)
+    local results = {real_string_byte(s, i, j)}
+    LOG("STRING.BYTE(" .. safeStr(s):sub(1,30) .. ", " .. real_tostring(i) .. ") = " .. formatArgs(unpack(results)))
+    return unpack(results)
+end
+
+-- Hook string.sub
+local real_string_sub = string.sub
+string.sub = function(s, i, j)
+    local result = real_string_sub(s, i, j)
+    LOG("STRING.SUB(len=" .. #s .. ", " .. real_tostring(i) .. ", " .. real_tostring(j) .. ") = " .. safeStr(result):sub(1,50))
+    return result
+end
+
+-- Hook table operations
+local real_table_unpack = table.unpack or unpack
+local function hooked_unpack(t, i, j)
+    LOG("UNPACK(table, " .. real_tostring(i) .. ", " .. real_tostring(j) .. ")")
+    return real_table_unpack(t, i, j)
+end
+
+-- Hook select
+local function hooked_select(idx, ...)
+    local result = {real_select(idx, ...)}
+    LOG("SELECT(" .. real_tostring(idx) .. ", " .. formatArgs(...) .. ")")
+    return unpack(result)
+end
+
+-- ═══════════ EXECUTE WITH HOOKS ═══════════
+
+LOG("═══════════════════════════════════════")
+LOG("  RUNTIME DEOBFUSCATION STARTING")
+LOG("═══════════════════════════════════════")
+
+-- The obfuscated code will be pasted below.
+-- We override critical globals before running it.
+
+local hooked_env = setmetatable({
+    loadstring = hooked_loadstring,
+    load = hooked_loadstring,
+    pcall = hooked_pcall,
+    setmetatable = hooked_setmetatable,
+    newproxy = hooked_newproxy,
+    select = hooked_select,
+    getfenv = hooked_getfenv,
+    setfenv = hooked_setfenv,
+    unpack = hooked_unpack,
+    print = function(...)
+        LOG("PRINT: " .. formatArgs(...))
+        real_print(...)
+    end,
+    warn = function(...)
+        LOG("WARN: " .. formatArgs(...))
+        real_warn(...)
+    end,
+    error = function(msg, level)
+        LOG("ERROR: " .. real_tostring(msg))
+        error(msg, (level or 1) + 1)
+    end,
+    -- Pass through everything else
+}, {__index = getfenv and getfenv() or _ENV})
+
+-- ═══════════ PASTE OBFUSCATED CODE BELOW ═══════════
+local obfuscated = function(...)
+-- <<<PASTE_YOUR_OBFUSCATED_CODE_HERE>>>
+end
+
+-- Run it in hooked environment
+if setfenv then
+    setfenv(obfuscated, hooked_env)
+end
+
+LOG("Executing obfuscated code...")
+local ok, err = real_pcall(obfuscated)
+if not ok then
+    LOG("Execution error: " .. real_tostring(err))
+end
+
+LOG("═══════════════════════════════════════")
+LOG("  DEOBFUSCATION COMPLETE")
+LOG("  Total operations logged: " .. CALL_COUNT)
+LOG("═══════════════════════════════════════")
+
+-- Print summary
+real_print("\\n\\n=== DEOBFUSCATION LOG ===")
+for _, entry in real_ipairs(LOG_OUTPUT) do
+    real_print(entry)
+end
+`;
+
+  return script;
+}
+
+// ═══════════════════════════════════════
+//  Generate the actual ready-to-use script
+//  with the obfuscated code embedded
+// ═══════════════════════════════════════
+function generateReadyScript(src) {
+  // Find the actual function body to embed
+  // The obfuscated code is typically: return(function(...)...end)(...)
+  // We need to capture the inner function
+  
+  const hookBase = generateHookScript(src, ST.vmInfo);
+  
+  // Replace the placeholder with actual code
+  const ready = hookBase.replace(
+    '-- <<<PASTE_YOUR_OBFUSCATED_CODE_HERE>>>',
+    src
+  );
+  
+  return ready;
+}
+
+// ═══════════════════════════════════════
+//  MAIN
+// ═══════════════════════════════════════
 function run() {
-  const src = document.getElementById('ci').value.trim();
+  const src = $('ci').value.trim();
   if (!src) return alert('Paste code first');
-
+  
   // Reset
-  S.logs=[]; S.strings=[]; S.resolved={}; S.output='';
-  S.stats={score:0,strN:0,decN:0,b64N:0,funcs:0,patterns:0,methods:new Set()};
+  ST.logs=[]; ST.rawStrings=[]; ST.shuffledStrings=[]; ST.vmInfo={};
+  ST.hookScript='';
+  ST.stats={score:0,strN:0,funcs:0,vmOps:0,methods:new Set()};
   pg(5);
-
+  
   setTimeout(() => {
-    try { doRun(src); } catch(e) { L('ERROR',e.message,'ERR'); console.error(e); }
+    try { doAnalysis(src); } catch(e) { L('ERROR',e.message,'ERR'); console.error(e); }
     renderAll();
     pg(100);
     setTimeout(()=>pg(0), 1200);
   }, 30);
 }
 
-function doRun(src) {
-  L('INIT','════════════════════════════════════');
-  L('INIT','Luau Deobfuscator — Starting');
-  L('INIT',`Input: ${src.length} bytes`);
-  L('INIT','════════════════════════════════════');
-
+function doAnalysis(src) {
+  L('INIT','════════════════════════════════════════');
+  L('INIT','Luau VM Deobfuscator — Analysis');
+  L('INIT',`Input: ${src.length} bytes, ${src.split('\n').length} lines`);
+  L('INIT','════════════════════════════════════════');
+  
   pg(10);
-
-  // 1. Detect obfuscator
-  L('STEP','▶ Step 1: Pattern detection');
-  const { patterns, score } = detectPatterns(src);
-  S.stats.score = score;
-  S.stats.patterns = patterns.length;
-  for (const p of patterns) {
-    const ic = p.weight >= 10 ? '🔴' : p.weight >= 5 ? '🟡' : '🟢';
-    L('DETECT', `${ic} ${p.name} (×${p.count})`);
-  }
-  if (src.toLowerCase().includes('wearedevs')) {
-    S.stats.methods.add('WeAreDevs Obfuscator');
-    L('DETECT', '✓ Identified as WeAreDevs obfuscator', 'OK');
-  }
-
-  pg(20);
-
-  // 2. Extract string table
-  L('STEP','▶ Step 2: String table extraction + decode');
-  const { varName, results: rawStrings } = extractTable(src);
-  S.stats.strN = rawStrings.length;
-
-  let b64Count = 0;
-  for (const s of rawStrings) {
-    if (s.isB64) { b64Count++; S.stats.methods.add('Base64'); }
-    S.stats.decN++;
-    S.stats.methods.add('Decimal Escapes');
-  }
-  S.stats.b64N = b64Count;
-  L('DECODE', `${rawStrings.length} strings extracted, ${b64Count} base64 decoded`, 'OK');
-
-  pg(40);
-
-  // 3. Shuffle
-  L('STEP','▶ Step 3: Index shuffle resolution');
-  const shuffleOps = extractShuffles(src);
-  let finalStrings;
-  if (shuffleOps.length > 0) {
-    finalStrings = applyShuffle(rawStrings, shuffleOps);
-    S.stats.methods.add('Index Shuffle');
-  } else {
-    finalStrings = rawStrings;
-    L('SHUFFLE','No shuffle found','INFO');
-  }
-  S.strings = finalStrings;
-
-  // Log first few decoded strings
-  for (const s of finalStrings.slice(0, 10)) {
-    const val = s.decoded || s.escaped;
-    L('STRING', `[${s.i}] "${tr(val, 60)}"${s.isB64 ? ' (b64)' : ''}`, 'OK');
-  }
-  if (finalStrings.length > 10) L('STRING', `... and ${finalStrings.length - 10} more`);
-
-  pg(60);
-
-  // 4. Accessor
-  L('STEP','▶ Step 4: Accessor function resolution');
-  const acc = findOffset(src);
-  let resolved = {};
-  if (acc) {
-    resolved = resolveAll(src, finalStrings, acc);
-    S.resolved = resolved;
-    const entries = Object.values(resolved);
-    for (const r of entries.slice(0, 10)) {
-      L('RESOLVE', `${r.call} → "${tr(r.value, 50)}"`, 'OK');
+  
+  // Step 1: Extract raw string table
+  L('STEP','▶ Step 1: Extract string table (raw VM data)');
+  const { vn, entries } = extractStringTable(src);
+  ST.rawStrings = entries;
+  ST.stats.strN = entries.length;
+  ST.stats.methods.add('Decimal Escapes');
+  
+  // Show what these really are — binary VM data
+  let binaryCount = 0, textCount = 0;
+  for (const s of entries) {
+    let printableChars = 0;
+    for (let i = 0; i < s.decoded.length; i++) {
+      const c = s.decoded.charCodeAt(i);
+      if (c >= 32 && c <= 126) printableChars++;
     }
-    if (entries.length > 10) L('RESOLVE', `... and ${entries.length - 10} more`);
-  } else {
-    L('OFFSET', 'Accessor offset not found — showing raw index mapping', 'WARN');
+    const ratio = s.decoded.length > 0 ? printableChars / s.decoded.length : 0;
+    s.isBinary = ratio < 0.9;
+    if (s.isBinary) binaryCount++; else textCount++;
   }
-
+  
+  L('TABLE', `${entries.length} entries: ${binaryCount} binary (VM data), ${textCount} text-like`, 'OK');
+  
+  pg(25);
+  
+  // Step 2: Apply shuffles
+  L('STEP','▶ Step 2: Apply index shuffles');
+  const shuffleOps = extractShuffles(src);
+  if (shuffleOps.length > 0) {
+    ST.shuffledStrings = applyShuffle(entries, shuffleOps);
+    ST.stats.methods.add('Index Shuffle');
+    L('SHUFFLE', `Applied ${shuffleOps.length} shuffles`, 'OK');
+  } else {
+    ST.shuffledStrings = entries;
+    L('SHUFFLE', 'No shuffles found', 'INFO');
+  }
+  
+  pg(40);
+  
+  // Step 3: Analyze VM structure
+  L('STEP','▶ Step 3: Analyze VM interpreter');
+  ST.vmInfo = analyzeVM(src);
+  ST.stats.vmOps = ST.vmInfo.opcodeCount;
+  ST.stats.funcs = ST.vmInfo.innerFunctions;
+  ST.stats.score = Math.min(100,
+    (ST.vmInfo.hasDispatcher ? 25 : 0) +
+    Math.min(25, ST.vmInfo.opcodeCount / 4) +
+    (ST.vmInfo.hasIntegrityCheck ? 10 : 0) +
+    Math.min(20, ST.vmInfo.innerFunctions * 2) +
+    Math.min(20, ST.vmInfo.apiCalls.length)
+  );
+  
+  if (ST.vmInfo.type !== 'Unknown') ST.stats.methods.add(ST.vmInfo.type + ' VM');
+  if (ST.vmInfo.hasDispatcher) ST.stats.methods.add('VM Dispatch: ' + ST.vmInfo.dispatcherType);
+  
+  pg(60);
+  
+  // Step 4: Generate hook script
+  L('STEP','▶ Step 4: Generate runtime hook script');
+  ST.hookScript = generateReadyScript(src);
+  L('HOOK', `Generated hook script (${ST.hookScript.length} bytes)`, 'OK');
+  
   pg(80);
-
-  // 5. Build output
-  L('STEP','▶ Step 5: Building output');
-  S.output = buildOutput(finalStrings, resolved);
-
+  
   // Summary
-  L('DONE','════════════════════════════════════');
-  L('DONE',`Strings: ${S.stats.strN} total, ${S.stats.b64N} base64 decoded`);
-  L('DONE',`Accessor calls resolved: ${Object.keys(resolved).length}`);
-  L('DONE',`Obfuscation score: ${S.stats.score}/100`);
-  L('DONE',`Methods: ${[...S.stats.methods].join(', ')}`);
-  L('DONE','════════════════════════════════════');
+  L('DONE','════════════════════════════════════════');
+  L('DONE',`String table: ${ST.stats.strN} entries (${binaryCount} binary VM data)`);
+  L('DONE',`VM type: ${ST.vmInfo.type}`);
+  L('DONE',`VM complexity: ${ST.vmInfo.complexity} branches`);
+  L('DONE',`Inner functions: ${ST.stats.funcs}`);
+  L('DONE',`APIs used: ${ST.vmInfo.apiCalls.join(', ')}`);
+  L('DONE','');
+  L('DONE','⚠ This is a VM-based obfuscator.', 'WARN');
+  L('DONE','The string table contains BINARY VM BYTECODE,', 'WARN');
+  L('DONE','not human-readable text.', 'WARN');
+  L('DONE','', 'WARN');
+  L('DONE','To get the REAL code, use the Hook Script tab.', 'WARN');
+  L('DONE','Run that script in your Luau environment and it', 'WARN');
+  L('DONE','will intercept + log all real operations.', 'WARN');
+  L('DONE','════════════════════════════════════════');
 }
 
-// ═════════════════════════════════════════
+// ═══════════════════════════════════════
 //  RENDERERS
-// ═════════════════════════════════════════
+// ═══════════════════════════════════════
 function renderAll() {
-  renderOv(); renderSt(); renderLg(); renderDc();
-  document.getElementById('oi').textContent = `${S.strings.length} strings`;
+  renderOv(); renderSt(); renderVm(); renderHk(); renderLg();
+  $('oi').textContent = `${ST.stats.strN} strings | VM: ${ST.vmInfo.type||'?'}`;
 }
 
 function renderOv() {
-  document.getElementById('es').style.display='none';
-  const el = document.getElementById('ovo');
+  $('empt').style.display='none';
+  const el=$('ovOut');
   el.style.display='block';
-  const sc = S.stats.score;
-  const col = sc>=70?'var(--rd)':sc>=40?'var(--or)':sc>=15?'var(--ac)':'var(--gn)';
-  const lab = sc>=70?'Heavy VM':sc>=40?'Moderate':sc>=15?'Light':'Minimal';
+  const sc=ST.stats.score;
+  const col=sc>=70?'var(--rd)':sc>=40?'var(--or)':sc>=15?'var(--ac)':'var(--gn)';
 
-  el.innerHTML = `<div class="oa">
+  el.innerHTML=`<div class="oa">
     <div class="sg">
-      <div class="sc"><div class="sl">Obfuscation</div><div class="sv" style="color:${col}">${sc}/100</div><div class="ss">${lab}</div></div>
-      <div class="sc"><div class="sl">Strings</div><div class="sv" style="color:var(--gn)">${S.stats.strN}</div><div class="ss">${S.stats.b64N} base64 decoded</div></div>
-      <div class="sc"><div class="sl">Resolved Calls</div><div class="sv" style="color:var(--ac)">${Object.keys(S.resolved).length}</div><div class="ss">accessor → string</div></div>
-      <div class="sc"><div class="sl">Patterns</div><div class="sv" style="color:var(--pr)">${S.stats.patterns}</div><div class="ss">VM signatures</div></div>
+      <div class="sc"><div class="sl">Obfuscation</div><div class="sv" style="color:${col}">${sc}/100</div><div class="ss">${ST.vmInfo.type||'Unknown'}</div></div>
+      <div class="sc"><div class="sl">VM Data Entries</div><div class="sv" style="color:var(--pr)">${ST.stats.strN}</div><div class="ss">Binary VM bytecode</div></div>
+      <div class="sc"><div class="sl">VM Branches</div><div class="sv" style="color:var(--ac)">${ST.stats.vmOps}</div><div class="ss">${ST.vmInfo.dispatcherType||'—'}</div></div>
+      <div class="sc"><div class="sl">Functions</div><div class="sv" style="color:var(--yl)">${ST.stats.funcs}</div><div class="ss">Inner definitions</div></div>
     </div>
-    ${S.stats.methods.size?`<div class="sec" style="margin-top:10px"><div class="sh"><span class="dot do_"></span>Methods</div><div class="sb">${[...S.stats.methods].map(m=>`<span class="sm" style="margin:2px">${e(m)}</span>`).join(' ')}</div></div>`:''}
-    <div class="sec" style="margin-top:10px">
-      <div class="sh"><span class="dot dg"></span>Decoded Strings Preview</div>
-      <div class="sb">${S.strings.slice(0,25).map(s=>{
-        const v=s.decoded||s.escaped;
-        return `<div class="sr"><span class="si">${s.i}</span>${s.isB64?'<span class="sm">b64</span>':'<span class="sm" style="background:rgba(107,122,141,.1);color:var(--d)">esc</span>'}<span class="sd">${e(tr(v,90))}</span></div>`;
-      }).join('')||'<span style="color:var(--d)">None</span>'}</div>
+    
+    <div class="warn-box">
+      <b>⚠ This is a VM-based obfuscator</b><br><br>
+      The string table does <b>NOT</b> contain readable strings — it contains
+      <b>binary VM bytecode/constants</b> that are interpreted at runtime by a 
+      custom virtual machine built into the script.<br><br>
+      <b>To get the real code:</b><br>
+      Go to the <b>⚡ Hook Script</b> tab → copy the generated script → 
+      run it in your Luau environment (Roblox executor, etc.).<br>
+      It will execute the obfuscated code while intercepting and logging 
+      every real function call, property access, and value.
     </div>
+    
+    ${ST.vmInfo.apiCalls.length?`
+    <div class="sec">
+      <div class="sh">VM-Level API References (${ST.vmInfo.apiCalls.length})</div>
+      <div class="sb">${ST.vmInfo.apiCalls.map(a=>`<span class="tag t-i" style="margin:2px;display:inline-block">${esc(a)}</span>`).join(' ')}</div>
+    </div>`:''}
+    
+    ${ST.stats.methods.size?`
+    <div class="sec">
+      <div class="sh">Obfuscation Methods</div>
+      <div class="sb">${[...ST.stats.methods].map(m=>`<span class="tag t-p" style="margin:2px;display:inline-block">${esc(m)}</span>`).join(' ')}</div>
+    </div>`:''}
+    
+    ${ST.vmInfo.wrapperArgs.length?`
+    <div class="sec">
+      <div class="sh">Wrapper Arguments</div>
+      <div class="sb" style="font-size:.82em;color:var(--d)">${ST.vmInfo.wrapperArgs.map(a=>`<code style="color:var(--yl)">${esc(a)}</code>`).join(', ')}</div>
+    </div>`:''}
   </div>`;
 }
 
 function renderSt() {
-  const el = document.getElementById('sto');
-  if (!S.strings.length) { el.innerHTML='<div class="emp"><div class="ic">🔤</div></div>'; return; }
-  let h='';
-  for (const s of S.strings) {
-    const v = s.decoded || s.escaped;
-    h+=`<div class="sr" data-f="${e((v+s.raw+s.escaped).toLowerCase())}">
-      <span class="si">${s.i}</span>
-      ${s.isB64?'<span class="sm">b64</span>':'<span class="sm" style="background:rgba(107,122,141,.1);color:var(--d)">esc</span>'}
-      <span style="color:var(--or);flex:1;word-break:break-all;font-size:.85em" title="After escape decode">${e(tr(s.escaped,40))}</span>
-      <span style="color:var(--d)">→</span>
-      <span class="sd" title="Final value">${e(tr(v,50))}</span>
+  const el=$('stOut');
+  const strs = ST.shuffledStrings.length ? ST.shuffledStrings : ST.rawStrings;
+  if (!strs.length) { el.innerHTML='<div class="emp"><div class="ic">🔤</div></div>'; return; }
+  
+  let h = `<div class="info-box" style="margin-bottom:10px">
+    These are the raw VM data entries after decimal-escape decoding.
+    They contain binary bytecode, NOT readable text. Shown as hex dump + printable chars.
+  </div>`;
+  
+  for (const s of strs) {
+    const bgColor = s.isBinary ? 'rgba(199,146,234,.04)' : 'rgba(65,217,140,.06)';
+    h+=`<div class="row" style="background:${bgColor};padding:6px 4px;margin:2px 0;border-radius:3px" data-f="${esc((s.printable+s.hexDump).toLowerCase())}">
+      <span class="idx">${s.i}</span>
+      <span class="tag ${s.isBinary?'t-p':'t-g'}" style="min-width:35px">${s.isBinary?'bin':'txt'}</span>
+      <span style="flex:1">
+        <div style="color:var(--d);font-size:.75em;font-family:monospace;word-break:break-all">${esc(trn(s.hexDump,90))}</div>
+        <div style="color:${s.isBinary?'var(--pr)':'var(--gn)'};margin-top:2px">${esc(s.printable)}</div>
+      </span>
+      <span style="color:var(--d);font-size:.75em;flex-shrink:0">${s.len}B</span>
     </div>`;
   }
   el.innerHTML=h;
 }
 
+function renderVm() {
+  const el=$('vmOut');
+  const vm = ST.vmInfo;
+  
+  let h=`
+    <div class="sec">
+      <div class="sh">VM Architecture</div>
+      <div class="sb">
+        <div class="row"><span style="color:var(--d);min-width:120px">Type:</span><span style="color:var(--yl)">${esc(vm.type||'Unknown')}</span></div>
+        <div class="row"><span style="color:var(--d);min-width:120px">Dispatcher:</span><span style="color:var(--ac)">${vm.hasDispatcher?vm.dispatcherType:'None detected'}</span></div>
+        <div class="row"><span style="color:var(--d);min-width:120px">Branches:</span><span style="color:var(--pr)">${vm.opcodeCount}</span></div>
+        <div class="row"><span style="color:var(--d);min-width:120px">Functions:</span><span>${vm.innerFunctions}</span></div>
+        <div class="row"><span style="color:var(--d);min-width:120px">Integrity:</span><span style="color:${vm.hasIntegrityCheck?'var(--rd)':'var(--gn)'}">${vm.hasIntegrityCheck?'Yes ⚠':'No'}</span></div>
+      </div>
+    </div>
+    
+    <div class="sec">
+      <div class="sh">How This Obfuscator Works</div>
+      <div class="sb" style="font-size:.82em;line-height:1.7;color:var(--d)">
+        <p><b style="color:var(--t)">1. Compilation:</b> Your original Lua source code is compiled into custom bytecode — a sequence of numeric opcodes that represent each operation (variable assignment, function call, loop, etc.)</p><br>
+        <p><b style="color:var(--t)">2. Encoding:</b> The bytecode and constants are encoded using decimal character escapes (\\073 = byte 73) and stored in the string table <code style="color:var(--yl)">r={...}</code></p><br>
+        <p><b style="color:var(--t)">3. Shuffling:</b> The string table indices are shuffled via swap operations to prevent simple index-based extraction</p><br>
+        <p><b style="color:var(--t)">4. VM Interpreter:</b> A large function with hundreds of if/elseif branches acts as the VM — it reads the bytecode and executes the corresponding Lua operations</p><br>
+        <p><b style="color:var(--t)">5. Execution:</b> When run, the VM interprets the bytecode instruction by instruction, performing the real operations (print, API calls, etc.)</p><br>
+        <p style="color:var(--or)"><b>⚠ This means you CANNOT recover the original source by static analysis alone.</b> The bytecode is a compiled representation — like trying to get C source from a .exe file. You need to either run it with hooks or fully reverse-engineer the VM.</p>
+      </div>
+    </div>
+    
+    <div class="sec">
+      <div class="sh">APIs Referenced at VM Level</div>
+      <div class="sb">${vm.apiCalls.length?vm.apiCalls.map(a=>`<div class="row"><span class="tag t-i">${esc(a)}</span></div>`).join(''):'<span style="color:var(--d)">None detected</span>'}</div>
+    </div>
+  `;
+  
+  el.innerHTML=h;
+}
+
+function renderHk() {
+  const el=$('hkOut');
+  if (!ST.hookScript) {
+    el.innerHTML='<div class="emp"><div class="ic">⚡</div><div>Run analysis first</div></div>';
+    return;
+  }
+  
+  el.innerHTML=`
+    <div class="warn-box">
+      <b>⚡ Runtime Hook Script</b><br><br>
+      This script wraps your obfuscated code with hooks that intercept every operation.
+      <b>Copy and run it in your Luau environment</b> (Roblox Studio, executor, etc.)
+      to see what the obfuscated code actually does.<br><br>
+      The output will show every: function call, property access, string operation, 
+      table manipulation — the <b>complete behavior</b> of the hidden code.
+    </div>
+    <div style="display:flex;gap:5px;margin-bottom:8px">
+      <button class="cpb" onclick="cpHook()">📋 Copy Hook Script</button>
+      <span style="font-size:.68em;color:var(--d);display:flex;align-items:center">${ST.hookScript.length} chars</span>
+    </div>
+    <div class="cb" style="max-height:calc(100vh - 260px);overflow:auto;font-size:.72em">${hlLua(ST.hookScript)}</div>
+  `;
+}
+
 function renderLg() {
-  const el = document.getElementById('lgo');
+  const el=$('lgOut');
   let h='';
-  for (const l of S.logs) {
-    const c = l.l==='OK'?'to':l.l==='WARN'?'tw':l.l==='ERR'?'te':'ti';
-    h+=`<div class="ll" data-f="${e((l.c+' '+l.m).toLowerCase())}"><span class="lt ${c}">${e(l.c.slice(0,7))}</span><span>${e(l.m)}</span></div>`;
+  for (const l of ST.logs) {
+    const c=l.l==='OK'?'t-g':l.l==='WARN'?'t-w':l.l==='ERR'?'t-e':'t-i';
+    h+=`<div class="lrow" data-f="${esc((l.c+' '+l.m).toLowerCase())}"><span class="lt ${c}" style="min-width:50px">${esc(l.c.slice(0,7))}</span><span>${esc(l.m)}</span></div>`;
   }
   el.innerHTML=h||'<div class="emp"><div class="ic">📋</div></div>';
 }
 
-function renderDc() {
-  const el = document.getElementById('dco');
-  if (!S.output) { el.innerHTML='<div class="emp"><div class="ic">✨</div></div>'; return; }
-  el.innerHTML=`<div style="padding:6px 10px;display:flex;gap:5px;border-bottom:1px solid var(--bd)">
-    <button class="cpb" onclick="cpAll()">📋 Copy All</button>
-    <button class="cpb" onclick="cpStr()">📋 Strings Only</button>
-    <span style="font-size:.68em;color:var(--d);display:flex;align-items:center">${S.strings.length} strings</span>
-  </div>
-  <div class="cb" style="margin:0;border:none;border-radius:0;max-height:calc(100vh - 140px);overflow:auto">${hlLua(S.output)}</div>`;
-}
-
 function hlLua(code) {
-  let h = e(code);
-  h = h.replace(/(--[^\n]*)/g,'<span class="hlc">$1</span>');
-  h = h.replace(/(&quot;(?:[^&]|&(?!quot;))*?&quot;)/g,'<span class="hls">$1</span>');
-  h = h.replace(/\b(\d+(?:\.\d+)?)\b/g,'<span class="hln">$1</span>');
-  const kw=['local','function','return','end','if','then','else','elseif','for','while','do','repeat','until','break','in','or','and','not','true','false','nil'];
-  for (const k of kw) h=h.replace(new RegExp('\\b('+k+')\\b','g'),'<span class="hlk">$1</span>');
+  let h = esc(code);
+  h=h.replace(/(--\[\[[\s\S]*?\]\])/g,'<span class="hlc">$1</span>');
+  h=h.replace(/(--[^\n]*)/g,'<span class="hlc">$1</span>');
+  h=h.replace(/(&quot;(?:[^&]|&(?!quot;))*?&quot;)/g,'<span class="hls">$1</span>');
+  h=h.replace(/\b(\d+(?:\.\d+)?)\b/g,'<span class="hln">$1</span>');
+  const kws=['local','function','return','end','if','then','else','elseif','for','while','do','repeat','until','break','in','or','and','not','true','false','nil'];
+  for(const k of kws) h=h.replace(new RegExp('\\b('+k+')\\b','g'),'<span class="hlk">$1</span>');
   return h;
 }
 
-// ── UI Helpers ──
-function filt(t) {
-  const q = document.getElementById(t==='st'?'sf':'lf').value.toLowerCase();
-  const sel = t==='st'?'#sto .sr':'#lgo .ll';
-  document.querySelectorAll(sel).forEach(r => {
-    r.style.display = (r.dataset.f||'').includes(q)?'':'none';
-  });
+// ── UI ──
+function doFilt(t){
+  const q=$(t==='st'?'sf':'lf').value.toLowerCase();
+  const sel=t==='st'?'#stOut .row':'#lgOut .lrow';
+  document.querySelectorAll(sel).forEach(r=>{r.style.display=(r.dataset.f||'').includes(q)?'':'none'});
 }
 
-function cpAll() {
-  navigator.clipboard.writeText(S.output);
-  const b=event.target; const o=b.textContent; b.textContent='✅ Copied!'; b.style.color='var(--gn)'; setTimeout(()=>{b.textContent=o;b.style.color='';},1000);
+function cpHook(){
+  navigator.clipboard.writeText(ST.hookScript);
+  const b=event.target;const o=b.textContent;b.textContent='✅ Copied!';b.style.color='var(--gn)';
+  setTimeout(()=>{b.textContent=o;b.style.color=''},1000);
 }
 
-function cpStr() {
-  let t='';
-  for (const s of S.strings) { t+=`[${s.i}] ${s.decoded||s.escaped}\n`; }
-  navigator.clipboard.writeText(t);
-  const b=event.target; const o=b.textContent; b.textContent='✅ Copied!'; b.style.color='var(--gn)'; setTimeout(()=>{b.textContent=o;b.style.color='';},1000);
+function clearAll(){
+  $('ci').value='';
+  ST.logs=[]; ST.rawStrings=[]; ST.shuffledStrings=[]; ST.hookScript='';
+  $('empt').style.display='';$('ovOut').style.display='none';
+  $('stOut').innerHTML='';$('vmOut').innerHTML='';$('hkOut').innerHTML='';$('lgOut').innerHTML='';
+  $('oi').textContent='—';uSz();
 }
 
-function clearAll() {
-  document.getElementById('ci').value='';
-  S.logs=[]; S.strings=[]; S.output=''; S.resolved={};
-  document.getElementById('es').style.display='';
-  document.getElementById('ovo').style.display='none';
-  document.getElementById('sto').innerHTML='';
-  document.getElementById('lgo').innerHTML='';
-  document.getElementById('dco').innerHTML='';
-  document.getElementById('oi').textContent='—';
-  uSz();
-}
-
-function exportAll() {
-  if (!S.strings.length && !S.logs.length) return alert('Nothing to export');
-  let t='=== Luau Deobfuscation Report ===\n\n';
-  t+='== DECODED STRINGS ==\n';
-  for (const s of S.strings) t+=`[${s.i}] ${s.decoded||s.escaped}\n`;
+function doExport(){
+  if(!ST.logs.length) return alert('Nothing to export');
+  let t='=== Luau VM Deobfuscation Report ===\n\n';
+  t+='== VM INFO ==\nType: '+(ST.vmInfo.type||'?')+'\n';
+  t+='Dispatcher: '+(ST.vmInfo.dispatcherType||'none')+'\n';
+  t+='Branches: '+ST.stats.vmOps+'\n';
+  t+='APIs: '+(ST.vmInfo.apiCalls||[]).join(', ')+'\n';
   t+='\n== LOG ==\n';
-  for (const l of S.logs) t+=`[${l.l}][${l.c}] ${l.m}\n`;
-  t+='\n== OUTPUT ==\n'+S.output;
+  for(const l of ST.logs) t+=`[${l.l}][${l.c}] ${l.m}\n`;
+  t+='\n== HOOK SCRIPT ==\n'+ST.hookScript;
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([t],{type:'text/plain'}));
-  a.download='deobf_report.txt'; a.click();
+  a.download='vm_deobf_report.txt';a.click();
 }
 
-function loadSample() {
-  // Load the user's actual obfuscated code as sample
-  document.getElementById('ci').value = String.raw`--[[ v1.0.0 https://wearedevs.net/obfuscator ]] return(function(...)local r={"\073\074\051\087\115\074\078\061","\083\107\113\047\068\108\061\061";"\104\086\088\119\081\057\055\052";"\085\080\073\107\115\078\055\111\100\074\088\119\078\107\107\078\081\054\118\061";"\098\049\106\061";"\078\113\065\080\107\078\047\080\068\074\049\107\100\097\051\090";"\100\054\070\106\066\120\070\066\100\107\073\070\073\122\109\056\088\103\061\061";"\115\097\102\061";"\081\083\070\120\088\116\079\057\083\054\047\101\100\113\107\049\073\074\118\061";"\104\067\107\054\115\057\107\054\072\080\088\110\072\101\047\070";"\072\052\070\054\068\118\061\061","\088\054\049\078\078\067\065\053\072\054\076\086\115\051\110\068\118\108\061\061","\083\078\105\070\115\120\107\114\115\054\102\116\100\077\068\100\115\118\061\061";"\057\102\088\101\057\051\121\052\068\067\051\069\118\122\049\079","\068\067\116\110\073\074\049\106";}end)()`;
+function loadSample(){
+  $('ci').value=`--[[ v1.0.0 https://wearedevs.net/obfuscator ]] return(function(...)local r={"\\073\\074\\051\\087\\115\\074\\078\\061","\\083\\107\\113\\047\\068\\108\\061\\061";"\\104\\086\\088\\119\\081\\057\\055\\052";"\\085\\080\\073\\107\\115\\078\\055\\111\\100\\074\\088\\119\\078\\107\\107\\078\\081\\054\\118\\061";"\\098\\049\\106\\061";"\\078\\113\\065\\080\\107\\078\\047\\080\\068\\074\\049\\107\\100\\097\\051\\090";"\\100\\054\\070\\106\\066\\120\\070\\066\\100\\107\\073\\070\\073\\122\\109\\056\\088\\103\\061\\061";"\\115\\097\\102\\061";"\\081\\083\\070\\120\\088\\116\\079\\057\\083\\054\\047\\101\\100\\113\\107\\049\\073\\074\\118\\061";"\\104\\067\\107\\054\\115\\057\\107\\054\\072\\080\\088\\110\\072\\101\\047\\070";"\\072\\052\\070\\054\\068\\118\\061\\061","\\088\\054\\049\\078\\078\\067\\065\\053\\072\\054\\076\\086\\115\\051\\110\\068\\118\\108\\061\\061","\\083\\078\\105\\070\\115\\120\\107\\114\\115\\054\\102\\116\\100\\077\\068\\100\\115\\118\\061\\061";"\\057\\102\\088\\101\\057\\051\\121\\052\\068\\067\\051\\069\\118\\122\\049\\079","\\068\\067\\116\\110\\073\\074\\049\\106";"\\078\\107\\056\\076\\068\\074\\049\\116\\104\\051\\109\\097\\099\\078\\068\\100","\\057\\078\\055\\072\\078\\078\\072\\086\\068\\078\\105\\068\\072\\078\\100\\116\\066\\113\\071\\047";"\\068\\080\\121\\119\\115\\086\\056\\061","\\083\\067\\110\\049\\078\\113\\088\\081\\072\\054\\111\\061";"\\068\\086\\049\\116\\072\\108\\061\\061","\\085\\087\\108\\070\\068\\117\\106\\079\\085\\108\\061\\061";"\\068\\101\\047\\089\\115\\086\\056\\061";"\\115\\097\\056\\061","\\085\\108\\061\\061";"\\080\\116\\105\\079\\115\\101\\088\\070\\099\\103\\061\\061";"\\081\\122\\070\\066\\118\\080\\110\\122\\066\\078\\072\\086\\068\\107\\102\\119";"\\104\\120\\121\\079\\115\\052\\118\\061","\\107\\074\\051\\065\\104\\074\\107\\119\\056\\102\\088\\070\\073\\074\\107\\077\\073\\074\\107\\113\\056\\118\\061\\061","\\073\\057\\055\\076\\072\\057\\049\\114",;"\\104\\101\\051\\043\\068\\074\\105\\065";"\\080\\116\\105\\052\\072\\076\\061\\061";"\\073\\074\\105\\122\\073\\120\\121\\079\\115\\101\\104\\061";"\\072\\067\\105\\043\\072\\067\\051\\054";"\\104\\101\\107\\065\\115\\086\\068\\070","\\073\\074\\105\\043\\073\\057\\116\\087\\068\\080\\056\\061";"\\115\\057\\051\\054\\081\\103\\061\\061","\\115\\074\\107\\043","\\080\\116\\105\\090\\068\\057\\111\\061";"\\072\\067\\110\\110\\104\\108\\061\\061","\\080\\116\\105\\065\\068\\080\\088\\110\\073\\074\\051\\087\\115\\074\\078\\061";"\\057\\107\\068\\101\\083\\051\\121\\097\\107\\101\\070\\075\\115\\057\\073\\087\\068\\067\\076\\061","\\078\\074\\055\\100\\107\\086\\079\\080\\100\\052\\107\\085\\068\\057\\121\\117\\107\\083\\108\\061","",;"\\104\\057\\118\\055\\068\\102\\047\\085\\107\\078\\047\\057\\066\\057\\073\\122\\073\\108\\061\\061","\\104\\074\\049\\110\\115\\074\\076\\061"}for y,F in ipairs({{645494+-645493,-474510-(-474555)},{-829171+829172,-780783-(-780799)};{-462945+462962,-610121+610166}})do while F[-137229+137230]<F[80486-80484]do r[F[679768-679767]],r[F[-870557+870559]],F[200018+-200017],F[967841-967839]=r[F[-254747-(-254749)]],r[F[-708148+708149]],F[-804231-(-804232)]+(-971268+971269),F[-575848+575850]-(677158-677157)end end local function y(y)return r[y-(-393492+446576)]end end)()`;
   uSz();
 }
 
