@@ -1,346 +1,105 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Luau VM Deobfuscator</title>
-    <style>
-        :root {
-            --bg0: #0a0e14;
-            --bg1: #11151c;
-            --bg2: #1a1f2b;
-            --bg3: #232938;
-            --border: #2d3548;
-            --text: #e1e8f0;
-            --dim: #6b7a8d;
-            --accent: #4fc1ff;
-            --green: #41d98c;
-            --red: #ff5c57;
-            --orange: #ffb347;
-            --purple: #c792ea;
-            --yellow: #ffe066;
-            --cyan: #56d4c8;
-            --pink: #ff6b9d;
-        }
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body {
-            font-family: 'JetBrains Mono','Fira Code','SF Mono',monospace;
-            background: var(--bg0);
-            color: var(--text);
-            min-height: 100vh;
-        }
-        .header {
-            background: var(--bg1);
-            border-bottom: 1px solid var(--border);
-            padding: 12px 20px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 10px;
-        }
-        .header h1 {
-            font-size: 1.1em;
-            background: linear-gradient(135deg, var(--accent), var(--purple));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        .header-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-        .btn {
-            padding: 7px 14px;
-            border: 1px solid var(--border);
-            border-radius: 5px;
-            background: var(--bg2);
-            color: var(--text);
-            font-family: inherit;
-            font-size: 0.8em;
-            cursor: pointer;
-            transition: 0.15s;
-        }
-        .btn:hover { border-color: var(--accent); background: rgba(79,193,255,0.08); }
-        .btn-go { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 700; }
-        .btn-go:hover { background: #79d4ff; }
-        .main {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            height: calc(100vh - 52px);
-        }
-        @media(max-width:850px) { .main { grid-template-columns:1fr; height:auto; } }
-        .panel {
-            display: flex;
-            flex-direction: column;
-            border-right: 1px solid var(--border);
-            overflow: hidden;
-        }
-        .panel:last-child { border-right: none; }
-        .panel-head {
-            background: var(--bg1);
-            border-bottom: 1px solid var(--border);
-            padding: 8px 14px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            flex-shrink: 0;
-        }
-        .panel-title {
-            font-size: 0.78em;
-            font-weight: 600;
-            color: var(--dim);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .dot {
-            width: 7px; height: 7px; border-radius: 50%;
-            display: inline-block; margin-right: 6px;
-        }
-        .dot-g { background: var(--green); }
-        .dot-b { background: var(--accent); }
-        .dot-o { background: var(--orange); }
-        .badge {
-            padding: 2px 8px;
-            border-radius: 10px;
-            font-size: 0.68em;
-            font-weight: 600;
-            background: rgba(79,193,255,0.12);
-            color: var(--accent);
-        }
-        .panel-body { flex: 1; overflow: hidden; position: relative; }
-        textarea {
-            width: 100%; height: 100%;
-            background: var(--bg0);
-            color: var(--text);
-            border: none;
-            padding: 14px;
-            font-family: inherit;
-            font-size: 0.8em;
-            line-height: 1.6;
-            resize: none;
-            outline: none;
-            tab-size: 4;
-        }
-        textarea::placeholder { color: var(--dim); opacity: 0.5; }
-        .tabs {
-            display: flex;
-            background: var(--bg1);
-            border-bottom: 1px solid var(--border);
-            overflow-x: auto;
-            flex-shrink: 0;
-        }
-        .tab {
-            padding: 7px 14px;
-            font-size: 0.75em;
-            color: var(--dim);
-            cursor: pointer;
-            border: none;
-            border-bottom: 2px solid transparent;
-            background: none;
-            font-family: inherit;
-            white-space: nowrap;
-            transition: 0.15s;
-        }
-        .tab:hover { color: var(--text); }
-        .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-        .tab-content { display: none; height: 100%; overflow-y: auto; }
-        .tab-content.active { display: block; }
-        .out-area {
-            padding: 14px;
-            font-size: 0.8em;
-            line-height: 1.6;
-            white-space: pre-wrap;
-            word-break: break-all;
-        }
-        .section {
-            background: var(--bg2);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            margin-bottom: 12px;
-            overflow: hidden;
-        }
-        .section-head {
-            padding: 8px 12px;
-            font-size: 0.75em;
-            font-weight: 600;
-            color: var(--dim);
-            text-transform: uppercase;
-            border-bottom: 1px solid var(--border);
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .section-body { padding: 10px 12px; }
-        .str-row {
-            display: flex;
-            gap: 10px;
-            padding: 3px 0;
-            border-bottom: 1px solid rgba(45,53,72,0.4);
-            font-size: 0.82em;
-            align-items: flex-start;
-        }
-        .str-row:last-child { border-bottom: none; }
-        .str-idx { color: var(--dim); min-width: 30px; text-align: right; flex-shrink: 0; }
-        .str-raw { color: var(--orange); word-break: break-all; flex: 1; }
-        .str-dec { color: var(--green); word-break: break-all; flex: 1; font-weight: 600; }
-        .str-method {
-            padding: 1px 5px;
-            border-radius: 3px;
-            font-size: 0.72em;
-            background: rgba(199,146,234,0.15);
-            color: var(--purple);
-            flex-shrink: 0;
-        }
-        .log-line {
-            padding: 2px 0;
-            font-size: 0.78em;
-            display: flex;
-            gap: 8px;
-        }
-        .log-tag {
-            padding: 1px 5px;
-            border-radius: 3px;
-            font-size: 0.72em;
-            font-weight: 600;
-            min-width: 55px;
-            text-align: center;
-            flex-shrink: 0;
-        }
-        .t-info { background: rgba(79,193,255,0.12); color: var(--accent); }
-        .t-ok { background: rgba(65,217,140,0.12); color: var(--green); }
-        .t-warn { background: rgba(255,179,71,0.12); color: var(--orange); }
-        .t-err { background: rgba(255,92,87,0.12); color: var(--red); }
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(160px,1fr));
-            gap: 10px;
-        }
-        .stat-card {
-            background: var(--bg1);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 12px;
-        }
-        .stat-label { font-size: 0.68em; color: var(--dim); text-transform: uppercase; margin-bottom: 4px; }
-        .stat-val { font-size: 1.4em; font-weight: 700; }
-        .stat-sub { font-size: 0.68em; color: var(--dim); margin-top: 2px; }
-        .empty {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            color: var(--dim);
-            gap: 8px;
-            padding: 30px;
-            text-align: center;
-        }
-        .empty .ico { font-size: 2.5em; opacity: 0.25; }
-        .code-block {
-            background: var(--bg1);
-            border: 1px solid var(--border);
-            border-radius: 5px;
-            padding: 12px;
-            font-size: 0.8em;
-            white-space: pre-wrap;
-            word-break: break-all;
-            overflow-x: auto;
-            line-height: 1.5;
-        }
-        .progress { height: 2px; background: var(--border); }
-        .progress-fill { height: 100%; background: linear-gradient(90deg,var(--accent),var(--purple)); width: 0; transition: width 0.3s; }
-        .copy-btn {
-            padding: 5px 10px;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            background: var(--bg2);
-            color: var(--text);
-            font-family: inherit;
-            font-size: 0.72em;
-            cursor: pointer;
-        }
-        .copy-btn:hover { border-color: var(--green); color: var(--green); }
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: var(--bg0); }
-        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
-        .hl-str { color: var(--green); }
-        .hl-num { color: var(--purple); }
-        .hl-kw { color: var(--pink); }
-        .hl-cmt { color: var(--dim); font-style: italic; }
-        .hl-fn { color: var(--yellow); }
-        .filter-bar {
-            padding: 6px 12px;
-            background: var(--bg1);
-            border-bottom: 1px solid var(--border);
-            flex-shrink: 0;
-        }
-        .filter-input {
-            width: 100%;
-            padding: 4px 8px;
-            background: var(--bg0);
-            border: 1px solid var(--border);
-            border-radius: 3px;
-            color: var(--text);
-            font-family: inherit;
-            font-size: 0.78em;
-            outline: none;
-        }
-        .filter-input:focus { border-color: var(--accent); }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Luau Deobfuscator</title>
+<style>
+:root{--b0:#0a0e14;--b1:#11151c;--b2:#1a1f2b;--b3:#232938;--bd:#2d3548;--t:#e1e8f0;--d:#6b7a8d;--ac:#4fc1ff;--gn:#41d98c;--rd:#ff5c57;--or:#ffb347;--pr:#c792ea;--yl:#ffe066;--cy:#56d4c8;--pk:#ff6b9d}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'JetBrains Mono','Fira Code',monospace;background:var(--b0);color:var(--t);min-height:100vh}
+.hdr{background:var(--b1);border-bottom:1px solid var(--bd);padding:10px 18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.hdr h1{font-size:1.05em;background:linear-gradient(135deg,var(--ac),var(--pr));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.acts{display:flex;gap:5px;flex-wrap:wrap}
+.btn{padding:6px 12px;border:1px solid var(--bd);border-radius:4px;background:var(--b2);color:var(--t);font-family:inherit;font-size:.76em;cursor:pointer;transition:.15s}
+.btn:hover{border-color:var(--ac);background:rgba(79,193,255,.08)}
+.btn-go{background:var(--ac);color:#000;border-color:var(--ac);font-weight:700}
+.btn-go:hover{background:#79d4ff}
+.mn{display:grid;grid-template-columns:1fr 1fr;height:calc(100vh - 48px)}
+@media(max-width:850px){.mn{grid-template-columns:1fr;height:auto}}
+.pn{display:flex;flex-direction:column;overflow:hidden;border-right:1px solid var(--bd)}
+.pn:last-child{border-right:none}
+.ph{background:var(--b1);border-bottom:1px solid var(--bd);padding:7px 12px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.pt{font-size:.73em;font-weight:600;color:var(--d);text-transform:uppercase;letter-spacing:.4px}
+.badge{padding:1px 7px;border-radius:9px;font-size:.65em;font-weight:600;background:rgba(79,193,255,.12);color:var(--ac)}
+.pb{flex:1;overflow:hidden;position:relative}
+textarea{width:100%;height:100%;background:var(--b0);color:var(--t);border:none;padding:12px;font-family:inherit;font-size:.78em;line-height:1.6;resize:none;outline:none;tab-size:4}
+textarea::placeholder{color:var(--d);opacity:.5}
+.tabs{display:flex;background:var(--b1);border-bottom:1px solid var(--bd);overflow-x:auto;flex-shrink:0}
+.tab{padding:6px 12px;font-size:.72em;color:var(--d);cursor:pointer;border:none;border-bottom:2px solid transparent;background:none;font-family:inherit;white-space:nowrap;transition:.15s}
+.tab:hover{color:var(--t)}
+.tab.on{color:var(--ac);border-bottom-color:var(--ac)}
+.tc{display:none;height:100%;overflow-y:auto}
+.tc.on{display:block}
+.oa{padding:12px;font-size:.78em;line-height:1.6;white-space:pre-wrap;word-break:break-all}
+.sec{background:var(--b2);border:1px solid var(--bd);border-radius:5px;margin-bottom:10px;overflow:hidden}
+.sh{padding:7px 10px;font-size:.72em;font-weight:600;color:var(--d);text-transform:uppercase;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:5px}
+.sb{padding:8px 10px}
+.sr{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid rgba(45,53,72,.4);font-size:.8em;align-items:flex-start}
+.sr:last-child{border-bottom:none}
+.si{color:var(--d);min-width:28px;text-align:right;flex-shrink:0}
+.sd{color:var(--gn);word-break:break-all;flex:1;font-weight:600}
+.sm{padding:1px 5px;border-radius:3px;font-size:.7em;background:rgba(199,146,234,.15);color:var(--pr);flex-shrink:0}
+.sg{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.sc{background:var(--b1);border:1px solid var(--bd);border-radius:5px;padding:10px}
+.sl{font-size:.65em;color:var(--d);text-transform:uppercase;margin-bottom:3px}
+.sv{font-size:1.3em;font-weight:700}
+.ss{font-size:.65em;color:var(--d);margin-top:2px}
+.ll{padding:2px 0;font-size:.76em;display:flex;gap:6px}
+.lt{padding:1px 4px;border-radius:3px;font-size:.7em;font-weight:600;min-width:48px;text-align:center;flex-shrink:0}
+.ti{background:rgba(79,193,255,.12);color:var(--ac)}
+.to{background:rgba(65,217,140,.12);color:var(--gn)}
+.tw{background:rgba(255,179,71,.12);color:var(--or)}
+.te{background:rgba(255,92,87,.12);color:var(--rd)}
+.cb{background:var(--b1);border:1px solid var(--bd);border-radius:4px;padding:10px;font-size:.78em;white-space:pre-wrap;word-break:break-all;overflow-x:auto;line-height:1.5}
+.pg{height:2px;background:var(--bd)}.pf{height:100%;background:linear-gradient(90deg,var(--ac),var(--pr));width:0;transition:width .3s}
+.cpb{padding:4px 8px;border:1px solid var(--bd);border-radius:3px;background:var(--b2);color:var(--t);font-family:inherit;font-size:.7em;cursor:pointer}
+.cpb:hover{border-color:var(--gn);color:var(--gn)}
+.emp{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--d);gap:8px;padding:30px;text-align:center}
+.emp .ic{font-size:2.2em;opacity:.25}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--b0)}
+::-webkit-scrollbar-thumb{background:var(--bd);border-radius:3px}
+.hls{color:var(--gn)}.hln{color:var(--pr)}.hlk{color:var(--pk)}.hlc{color:var(--d);font-style:italic}.hlf{color:var(--yl)}
+.fi{padding:5px 10px;background:var(--b1);border-bottom:1px solid var(--bd);flex-shrink:0}
+.fin{width:100%;padding:3px 7px;background:var(--b0);border:1px solid var(--bd);border-radius:3px;color:var(--t);font-family:inherit;font-size:.76em;outline:none}
+.fin:focus{border-color:var(--ac)}
+.dot{width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:5px}
+.dg{background:var(--gn)}.db{background:var(--ac)}.do_{background:var(--or)}
+</style>
 </head>
 <body>
-    <div class="header">
-        <h1>🔓 Luau VM Deobfuscator</h1>
-        <div class="header-actions">
-            <button class="btn" onclick="loadSample()">📋 Load Sample</button>
-            <button class="btn" onclick="clearAll()">🗑️ Clear</button>
-            <button class="btn btn-go" onclick="deobfuscate()">⚡ Deobfuscate</button>
-            <button class="btn" onclick="exportAll()">💾 Export</button>
-        </div>
-    </div>
-    <div class="progress"><div class="progress-fill" id="prog"></div></div>
-    <div class="main">
-        <div class="panel">
-            <div class="panel-head">
-                <span class="panel-title"><span class="dot dot-g"></span>Input</span>
-                <span class="badge" id="inSize">0 B</span>
-            </div>
-            <div class="panel-body">
-                <textarea id="codeIn" placeholder="Paste obfuscated Luau/Lua code here..."></textarea>
-            </div>
-        </div>
-        <div class="panel">
-            <div class="panel-head">
-                <span class="panel-title"><span class="dot dot-b"></span>Output</span>
-                <span class="badge" id="outInfo">—</span>
-            </div>
-            <div class="tabs">
-                <button class="tab active" data-tab="overview">📊 Overview</button>
-                <button class="tab" data-tab="strings">🔤 Strings</button>
-                <button class="tab" data-tab="structure">🌳 Structure</button>
-                <button class="tab" data-tab="log">📋 Log</button>
-                <button class="tab" data-tab="decoded">✨ Decoded</button>
-            </div>
-            <div class="panel-body">
-                <div class="tab-content active" id="tab-overview">
-                    <div class="empty" id="emptyState"><div class="ico">🔓</div><div>Paste code & click <b>Deobfuscate</b></div></div>
-                    <div id="overviewOut" style="display:none"></div>
-                </div>
-                <div class="tab-content" id="tab-strings">
-                    <div class="filter-bar"><input class="filter-input" id="strFilter" placeholder="Filter strings..." oninput="filterStrRows()"></div>
-                    <div class="out-area" id="stringsOut"></div>
-                </div>
-                <div class="tab-content" id="tab-structure">
-                    <div class="out-area" id="structOut"></div>
-                </div>
-                <div class="tab-content" id="tab-log">
-                    <div class="filter-bar"><input class="filter-input" id="logFilter" placeholder="Filter log..." oninput="filterLogRows()"></div>
-                    <div class="out-area" id="logOut"></div>
-                </div>
-                <div class="tab-content" id="tab-decoded">
-                    <div class="out-area" id="decodedOut"></div>
-                </div>
-            </div>
-        </div>
-    </div>
-    <script src="index.js"></script>
+<div class="hdr">
+<h1>🔓 Luau Deobfuscator</h1>
+<div class="acts">
+<button class="btn" onclick="loadSample()">📋 Sample</button>
+<button class="btn" onclick="clearAll()">🗑️ Clear</button>
+<button class="btn btn-go" onclick="run()">⚡ Deobfuscate</button>
+<button class="btn" onclick="exportAll()">💾 Export</button>
+</div>
+</div>
+<div class="pg"><div class="pf" id="pg"></div></div>
+<div class="mn">
+<div class="pn">
+<div class="ph"><span class="pt"><span class="dot dg"></span>Input</span><span class="badge" id="sz">0 B</span></div>
+<div class="pb"><textarea id="ci" placeholder="Paste obfuscated Luau code here..."></textarea></div>
+</div>
+<div class="pn">
+<div class="ph"><span class="pt"><span class="dot db"></span>Output</span><span class="badge" id="oi">—</span></div>
+<div class="tabs">
+<button class="tab on" data-t="ov">📊 Overview</button>
+<button class="tab" data-t="st">🔤 Strings</button>
+<button class="tab" data-t="lg">📋 Log</button>
+<button class="tab" data-t="dc">✨ Result</button>
+</div>
+<div class="pb">
+<div class="tc on" id="t-ov"><div class="emp" id="es"><div class="ic">🔓</div><div>Paste code & click <b>Deobfuscate</b></div></div><div id="ovo" style="display:none"></div></div>
+<div class="tc" id="t-st"><div class="fi"><input class="fin" id="sf" placeholder="Filter..." oninput="filt('st')"></div><div class="oa" id="sto"></div></div>
+<div class="tc" id="t-lg"><div class="fi"><input class="fin" id="lf" placeholder="Filter..." oninput="filt('lg')"></div><div class="oa" id="lgo"></div></div>
+<div class="tc" id="t-dc"><div class="oa" id="dco"></div></div>
+</div>
+</div>
+</div>
+<script src="index.js"></script>
 </body>
 </html>
